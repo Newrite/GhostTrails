@@ -24,6 +24,7 @@ export namespace GhostTrails
         std::uint32_t slotsPerActor{16};
         std::uint32_t totalSlots{64};
         std::uint32_t clonesPerFrame{1};
+        std::uint32_t coverageMiB{512};
         float idleSeconds{10.0f};
     };
 

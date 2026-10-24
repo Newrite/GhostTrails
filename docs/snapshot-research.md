@@ -14,6 +14,7 @@ These are static observations, not in-game validation or timing measurements.
 | NiObjectNET ProcessClone | 69162 | 70523 | `0xCA6A50` |
 | NiAlphaProperty no-argument factory | 69311 | 70684 | `0xCADF10` |
 | BSLightingShaderProperty no-argument factory | 99847 | 106492 | `0x1302ED0` |
+| NiSourceTexture named factory | 69335 | 70717 | `0xCAEF60` |
 
 `E:/Reverse/offsets-1.5.97.0.txt` contains relative offsets; the 1.6.1170 text
 file contains full IDA addresses. They must not be interpreted interchangeably.
@@ -84,7 +85,8 @@ transforms across that boundary.
 
 Pool Initialize performs no cloning. Grow creates one detached clone. Matches
 checks ordered scene identities, parent links, skins, partitions, shader and
-material identities, flattened-array identity/count and mesh buffer dimensions.
+material/diffuse/SRV/alpha-property identities and settings, flattened-array
+identity/count and mesh buffer dimensions.
 The caller invokes it only for actors requested through the API. Warm Spawn
 copies local/world/previous-world transforms, bounds and flattened-bone poses;
 dynamic geometry copies its separate CPU buffer under the source spinlock.
@@ -97,9 +99,60 @@ Expiration, cancellation and pool destruction hide and detach the root before
 releasing either owner. Reuse selects only inactive slots; it does not erase a
 previous caller's still-visible ghost. Controllers, collision objects, user-data
 and extra-data are removed from detached clone nodes. Auxiliary lights,
-particles, overlays, invisible surfaces and decals stay hidden. Native lighting
-materials remain lighting materials; effect-shaded armor is rendered through a
-fresh lighting property, retaining its native mesh and skin.
+particles, overlays, invisible surfaces and decals stay hidden. Meshes retain
+their native vertex buffers and skin, while materials use the same ordinary
+lighting variant for both originally lit and effect-shaded surfaces.
+
+## Unified silhouette materials (1.0.2)
+
+`Materials.ixx` owns material normalization and the actor pool's cutout cache;
+`Coverage.ixx` owns the engine-independent D3D11 conversion and memory admission.
+Geometry owns the frozen scene and a detached, independently cloned fade-node
+controller per ghost. The controller outlives that ghost's root. It is never
+attached to the scene, so distance/animation updates cannot overwrite its fade.
+The frame owner supplies `alpha * remainingLifetimeFraction` to its native fade
+channels. Materials keep alpha 1 and disable blending. Screen-door fade and
+depth writes replace additive accumulation of all visible layers. Material
+subclasses, texture RGB, vertex colours/alpha, normal maps, skin/hair tints,
+environment/refraction/glow effects and author opacity are not inherited.
+
+SE pass construction (`0x1412C6200`) selects accumulation hint 10 for an opaque
+material with fade below 1 and `kScreendoorAlphaFade`. Lighting geometry setup
+(`0x1412F2BB0`) selects the native fade stencil state from that controller's
+fade. The corresponding flag/hint branch was also inspected through the AE
+1.6.1170 and VR 1.4.15 lighting-property vtables. Fade members use CommonLib's
+SE/AE/VR runtime accessor. The source-texture factories were decompiled on all
+three runtimes; native renderer texture initialization was checked against SE
+`0x140D6DBC0`. No new renderer hooks or replacement game shaders are installed.
+
+Cutout textures use independent RGBA8 GPU copies: white RGB, original alpha at
+every source mip. Original UV transforms and clamp modes remain. Authored alpha
+test thresholds remain; blended-only surfaces use nonzero coverage as a cutout.
+An actor's unchanged textures are retained when unrelated scene attachments
+change, and unused entries are pruned against the new source graph. Cache
+entries retain their source texture; streaming SRV replacement invalidates the
+scene bindings and replaces that entry. Reset, unloading and idle eviction
+release the masks through native NiSourceTexture ownership. A shared game-thread
+budget defaults to 512 MiB (`MaxCoverageMiB`) for retained mask allocations.
+Move-only leases return admission when their native texture owner is released;
+allocation, unsupported-view and admission failures identify the affected surface.
+Driver-retained in-flight commands may outlive those CPU owners temporarily.
+
+The embedded compute shader runs only during cold preparation. Commands are
+recorded on an isolated deferred context and executed under the engine renderer
+lock with immediate-state restoration enabled. There is no readback, explicit
+GPU wait, engine geometry work on a worker, or image file written into Data.
+Shader bytecode is generated from the checked-in HLSL with Windows SDK fxc;
+xmake checks it before module dependency discovery.
+
+`CoverageTests` imports the production module and executes the shader on WARP
+and, with `--hardware`, a real adapter. It checks all pixels/mips, odd dispatch
+dimensions, nonzero mip starts, BC3 sRGB source alpha, unchanged source pixels,
+restored graphics/compute state, typed rejection and shared-budget lifetime.
+These checks do not establish the in-game visual result, native resource teardown
+or compatibility with Community Shaders/TAA/VR. Evaluate the original reported
+hair, boots, body/hand boundaries and eye/jaw visibility in a new game session,
+then exercise repeated reuse, 3D changes, cell changes and loading a save.
 
 ## Rim-lighting initialization and first visible spawn
 

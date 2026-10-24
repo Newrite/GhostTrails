@@ -21,10 +21,19 @@ option_end()
 
 includes(get_config("commonlib"))
 set_project("GhostTrails")
-set_version("1.0.1")
+set_version("1.0.2")
 set_config("skyrim_se", true)
 set_config("skyrim_ae", true)
 set_config("skyrim_vr", true)
+
+local function ensure_coverage_shader()
+    local source = path.join(os.projectdir(), "shaders/Coverage.hlsl")
+    local header = path.join(os.projectdir(), "shaders/Coverage.bytecode.h")
+    local compiler = path.join(os.projectdir(), "tools/CompileShaders.ps1")
+    if not os.isfile(header) or os.mtime(source) > os.mtime(header) or os.mtime(compiler) > os.mtime(header) then
+        os.vrunv("powershell.exe", {"-NoProfile", "-File", compiler})
+    end
+end
 
 target("GhostTrails")
     add_rules("commonlibsse-ng.plugin", {
@@ -35,8 +44,10 @@ target("GhostTrails")
     set_pcxxheader("src/PCH.h")
     add_files("src/*.cpp", "src/*.ixx")
     add_headerfiles("include/*.h", "src/PCH.h")
+    add_headerfiles("shaders/*.h", "shaders/*.hlsl")
     add_cxxflags("/utf-8", "/Zc:preprocessor", {tools = "cl"})
     on_load(function (target)
+        ensure_coverage_shader()
         -- The CommonLib rule renders these configfiles after source discovery.
         -- Retain them when absent after `xmake clean`, so the first build also
         -- compiles the Windows resource and the generated SKSE export triad.
@@ -61,3 +72,11 @@ target("GhostTrails.SDKConsumer")
     add_includedirs("include")
     add_files("examples/NativeConsumer.ixx", "tests/SDKConsumer.cpp")
     add_cxxflags("/utf-8", "/Zc:preprocessor", {tools = "cl"})
+
+target("GhostTrails.CoverageTests")
+    set_kind("binary")
+    set_default(false)
+    add_files("src/Coverage.ixx", "tests/CoverageTests.cpp")
+    add_links("d3d11")
+    add_cxxflags("/utf-8", "/Zc:preprocessor", {tools = "cl"})
+    on_load(ensure_coverage_shader)
