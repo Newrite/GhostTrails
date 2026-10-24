@@ -19,6 +19,7 @@ module;
 
 export module GhostTrails.Geometry;
 import GhostTrails.Materials;
+import GhostTrails.Coverage;
 
 namespace GhostTrails::Geometry
 {
@@ -169,11 +170,6 @@ namespace GhostTrails::Geometry
         RE::NiSkinPartition* partition{};
         RE::BSShaderProperty* shader{};
         RE::BSShaderMaterial* material{};
-        RE::NiSourceTexture* diffuse{};
-        const void* diffuseView{};
-        RE::NiAlphaProperty* alpha{};
-        std::uint16_t alphaFlags{};
-        std::uint8_t alphaThreshold{};
         const RE::BSFlattenedBoneTree::BoneEntry* bones{};
         std::uint32_t boneCount{};
         std::uint16_t vertices{}, triangles{};
@@ -192,17 +188,6 @@ namespace GhostTrails::Geometry
             stamp.partition = stamp.skin ? stamp.skin->skinPartition.get() : nullptr;
             stamp.shader = data.shaderProperty.get();
             stamp.material = stamp.shader ? stamp.shader->material : nullptr;
-            stamp.alpha = data.alphaProperty.get();
-            if (stamp.alpha) {
-                stamp.alphaFlags = stamp.alpha->alphaFlags;
-                stamp.alphaThreshold = stamp.alpha->alphaThreshold;
-            }
-            if (auto* lit = netimmerse_cast<RE::BSLightingShaderProperty*>(stamp.shader); lit && lit->material) {
-                stamp.diffuse = static_cast<RE::BSLightingShaderMaterialBase*>(lit->material)->diffuseTexture.get();
-            } else if (auto* effect = netimmerse_cast<RE::BSEffectShaderProperty*>(stamp.shader); effect && effect->GetMaterial()) {
-                stamp.diffuse = effect->GetMaterial()->sourceTexture.get();
-            }
-            if (stamp.diffuse && stamp.diffuse->rendererTexture) stamp.diffuseView = stamp.diffuse->rendererTexture->resourceView;
         }
         if (auto* tree = netimmerse_cast<RE::BSFlattenedBoneTree*>(&object)) {
             const auto& data = tree->GetRuntimeData();
@@ -225,24 +210,33 @@ namespace GhostTrails::Geometry
 
     const char* Exclusion(RE::BSGeometry& geometry)
     {
-        const std::string_view name = Name(geometry);
-        if (name.find(" [Ovl") != std::string_view::npos || name.find(" [SOvl") != std::string_view::npos) {
-            return "RaceMenu overlay";
+        const auto& data = geometry.GetGeometryRuntimeData();
+        Coverage::SourceSurface source{Name(geometry), Coverage::Shading::Unsupported,
+            data.skinInstance ? Coverage::Skinning::Skinned : Coverage::Skinning::Rigid,
+            Coverage::Role::Ordinary, 1, 1};
+
+        if (const auto* lit = netimmerse_cast<RE::BSLightingShaderProperty*>(data.shaderProperty.get()); lit && lit->material) {
+            source.shading = Coverage::Shading::Lighting;
+            source.propertyAlpha = lit->alpha;
+            source.materialAlpha = static_cast<RE::BSLightingShaderMaterialBase*>(lit->material)->materialAlpha;
+            if (lit->flags.all(ShaderFlag::kWeaponBlood)) source.role = Coverage::Role::WeaponBlood;
+            else if (lit->flags.all(ShaderFlag::kDecal)) source.role = Coverage::Role::Decal;
+        } else if (auto* effect = netimmerse_cast<RE::BSEffectShaderProperty*>(data.shaderProperty.get()); effect && effect->GetMaterial()) {
+            source.shading = Coverage::Shading::Effect;
+            source.propertyAlpha = effect->alpha;
+            source.materialAlpha = effect->GetMaterial()->baseColor.alpha;
         }
 
-        const auto& data = geometry.GetGeometryRuntimeData();
-        const auto* lit = netimmerse_cast<RE::BSLightingShaderProperty*>(data.shaderProperty.get());
-        auto* effect = netimmerse_cast<RE::BSEffectShaderProperty*>(data.shaderProperty.get());
-        if (lit && lit->material) {
-            const auto* material = static_cast<RE::BSLightingShaderMaterialBase*>(lit->material);
-            if (lit->alpha <= 0 || material->materialAlpha <= 0) return "invisible source surface";
-            if (lit->flags.all(ShaderFlag::kWeaponBlood) || lit->flags.all(ShaderFlag::kDecal)) return "decal";
-        } else if (effect && effect->GetMaterial()) {
-            if (effect->alpha <= 0 || effect->GetMaterial()->baseColor.alpha <= 0) return "invisible source surface";
-        } else {
-            return "unsupported lighting/effect material";
+        const auto excluded = Coverage::Exclude(source);
+        if (!excluded) return nullptr;
+        switch (*excluded) {
+        case Coverage::Exclusion::Overlay: return "RaceMenu overlay";
+        case Coverage::Exclusion::Invisible: return "invisible source surface";
+        case Coverage::Exclusion::Decal: return "blood/rigid decal";
+        case Coverage::Exclusion::AuxiliaryEffect: return "unskinned auxiliary effect";
+        case Coverage::Exclusion::Unsupported: return "unsupported lighting/effect material";
         }
-        return nullptr;
+        return "unsupported lighting/effect material";
     }
 
     using TransformMap = std::unordered_map<const RE::NiTransform*, const RE::NiTransform*>;
@@ -319,7 +313,6 @@ namespace GhostTrails::Geometry
 
     struct Ghost
     {
-        RE::NiPointer<RE::BSFadeNode> fade; // Detached controller; never engine-updated, outlives root.
         RE::NiPointer<RE::NiNode> root;
         RE::NiPointer<RE::NiNode> parent;
         // Bindings borrow the pool's retained source nodes and this owned root.
@@ -341,7 +334,7 @@ namespace GhostTrails::Geometry
         Ghost(const Ghost&) = delete;
         Ghost& operator=(const Ghost&) = delete;
         Ghost(Ghost&&) = default;
-        Ghost& operator=(Ghost&&) = delete;
+        Ghost& operator=(Ghost&&) = default;
         ~Ghost() { Detach(); }
 
         void Detach()
@@ -356,11 +349,6 @@ namespace GhostTrails::Geometry
 
         void ApplyLook(const API::Appearance& look, float visibility)
         {
-            if (fade) {
-                auto& control = fade->GetRuntimeData();
-                control.currentFade = look.alpha * visibility;
-                control.unk14C = control.currentFade; // Alternate fade channel selected by LOD-mode render passes.
-            }
             for (auto& surface : surfaces) {
                 *surface.emissive = {look.red, look.green, look.blue};
                 surface.property->emissiveMult = look.intensity;
@@ -371,6 +359,7 @@ namespace GhostTrails::Geometry
                     surface.property->SetFlags(RE::BSShaderProperty::EShaderPropertyFlag8::kRimLighting, rim);
                 }
                 surface.material->rimLightPower = look.rimPower;
+                surface.ApplyOpacity(look.alpha * visibility);
             }
         }
     };
@@ -427,30 +416,31 @@ export namespace GhostTrails::Geometry
     class Pool
     {
     public:
-        explicit Pool(Materials::Budget& budget) : masks_(budget) {}
+        Pool() = default;
         Pool(const Pool&) = delete;
         Pool& operator=(const Pool&) = delete;
         Pool(Pool&&) = default;
-        Pool& operator=(Pool&&) = delete;
+        Pool& operator=(Pool&&) = default;
         ~Pool() { Clear(); }
 
         void Clear()
         {
-            ClearScene();
-            masks_.Clear();
+            ghosts_.clear();
+            topology_.clear();
+            sources_.clear();
+            sourceRoot_.reset();
+            white_.reset();
         }
 
         bool Initialize(RE::NiNode* root)
         {
+            Clear();
             std::vector<RE::NiAVObject*> nodes;
             if (!Collect(root, nodes)) {
-                Clear();
                 logger::warn("Ghost source rejected: missing root, cycle or shared scene child");
                 return false;
             }
 
-            ClearScene();
-            masks_.Retain(nodes); // Equipment/embedded arrows can change without changing the hair mask.
             sourceRoot_.reset(root);
             sources_.reserve(nodes.size());
             topology_.reserve(nodes.size());
@@ -514,10 +504,7 @@ export namespace GhostTrails::Geometry
                 RE::NiPointer<RE::NiTexture> texture;
                 RE::BSShaderManager::GetTexture("textures\\effects\\fxwhite.dds", true, texture, false);
                 white_.reset(netimmerse_cast<RE::NiSourceTexture*>(texture.get()));
-            }
-            if (!white_ || !white_->rendererTexture || !white_->rendererTexture->resourceView) {
-                logger::warn("Ghost build deferred: required neutral white texture/SRV is not ready");
-                return std::unexpected(Error::NoGeometry);
+                if (!white_) logger::warn("Ghost white texture unavailable: source diffuse textures retained");
             }
 
             Ghost ghost;
@@ -563,7 +550,7 @@ export namespace GhostTrails::Geometry
                     } else if (!BindSkin(*original, *geometry, clone.pairs, transforms, *ghost.root)) {
                         binding.hidden = true;
                         logger::warn("Ghost surface '{}' omitted: skin is shared or references a bone outside the source graph", Name(*target));
-                    } else if (auto surface = Materials::MakeSurface(*original, *geometry, white_, masks_, ghost.fade)) {
+                    } else if (auto surface = Materials::MakeSurface(*original, *geometry, white_)) {
                         ghost.surfaces.push_back(*surface);
                         if (auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get()) ghost.skins.push_back(skin);
                     } else {
@@ -689,20 +676,10 @@ export namespace GhostTrails::Geometry
         std::size_t Size() const { return ghosts_.size(); }
 
     private:
-        void ClearScene()
-        {
-            ghosts_.clear();
-            topology_.clear();
-            sources_.clear();
-            sourceRoot_.reset();
-            white_.reset();
-        }
-
         RE::NiPointer<RE::NiNode> sourceRoot_;
         std::vector<RE::NiPointer<RE::NiAVObject>> sources_;
         std::vector<Stamp> topology_;
         RE::NiPointer<RE::NiSourceTexture> white_;
-        Materials::Masks masks_;
         std::vector<Ghost> ghosts_;
     };
 }

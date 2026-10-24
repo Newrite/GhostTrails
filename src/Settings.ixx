@@ -63,7 +63,6 @@ export namespace GhostTrails
             else if (key == "TotalSlots" && number > 0 && number <= 4096) settings.limits.totalSlots = number;
             else if (key == "ClonesPerFrame" && number > 0 && number <= 64) settings.limits.clonesPerFrame = number;
             else if (key == "IdleSeconds" && number > 0) settings.limits.idleSeconds = static_cast<float>(number);
-            else if (key == "MaxCoverageMiB" && number > 0) settings.limits.coverageMiB = number;
             else logger::warn("INI unknown key or out-of-range value {}={}", key, value);
         }
         if (input.bad()) logger::warn("I/O error while reading GhostTrails.ini");

@@ -7,7 +7,6 @@ export module GhostTrails.Runtime;
 import GhostTrails.Requests;
 import GhostTrails.Timeline;
 import GhostTrails.Geometry;
-import GhostTrails.Materials;
 
 export namespace GhostTrails
 {
@@ -16,8 +15,7 @@ export namespace GhostTrails
     class Runtime
     {
     public:
-        Runtime(Requests& requests, Limits limits) : requests_(requests), limits_(limits),
-            coverageBudget_(std::uint64_t(limits.coverageMiB) * 1024 * 1024) {}
+        Runtime(Requests& requests, Limits limits) : requests_(requests), limits_(limits) {}
 
         void Reset()
         {
@@ -107,7 +105,6 @@ export namespace GhostTrails
     private:
         struct ActorPool
         {
-            explicit ActorPool(Materials::Budget& budget) : pool(budget) {}
             Geometry::Pool pool;
             RE::NiPointer<RE::NiNode> root;
             RE::NiPointer<RE::NiNode> parent;
@@ -169,7 +166,7 @@ export namespace GhostTrails
                     Retry(request, timeline, API::Failure::Capacity);
                     return;
                 }
-                found = actors_.try_emplace(request.actor, coverageBudget_).first;
+                found = actors_.try_emplace(request.actor).first;
             }
             auto& entry = found->second;
             entry.lastUse = wallTime;
@@ -252,7 +249,6 @@ export namespace GhostTrails
 
         Requests& requests_;
         Limits limits_;
-        Materials::Budget coverageBudget_; // Outlives all actor pools and their resource leases.
         std::unordered_map<API::ActorHandle, ActorPool> actors_;
         std::unordered_map<API::RequestID, Timeline> work_;
         double gameTime_{};
