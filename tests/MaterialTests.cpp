@@ -46,40 +46,42 @@ namespace
         Check(C::Exclude(effect) == C::Exclusion::Overlay, "overlay exclusion is independent of material support");
     }
 
-    void CutoutFade()
+    void NativeFadeCoverage()
     {
-        const C::Cutout hair{128};
-        constexpr float quarterOpacity = 0.25f;
-        // The old fixed cutoff rejects even an opaque strand at this fade.
-        Check(255 * quarterOpacity < 128, "regression fixture actually exposes the early disappearance");
-        Check(255 * quarterOpacity >= hair.Reference(quarterOpacity), "an opaque strand survives at the requested quarter opacity");
-        Check(0 * quarterOpacity < hair.Reference(quarterOpacity), "empty texture pixels still fail the cutout");
+        // Regression: a scaled positive cutoff can write invisible depth.
+        const float oldReference = 128 * 0.5f;
+        Check(80 >= oldReference + 1 && 80 * 0.5f < oldReference,
+            "fixture exposes depth-writing texels rejected by colour");
 
-        bool retained = true, bounded = true, fullOpacityUnchanged = true;
-        for (unsigned reference = 0; reference < 256; ++reference) {
-            const C::Cutout cutout{static_cast<std::uint8_t>(reference)};
-            fullOpacityUnchanged &= cutout.Reference(1) == reference;
-            for (unsigned step = 0; step <= 64; ++step) {
-                const float opacity = step / 64.0f;
-                const float threshold = cutout.Reference(opacity);
-                const float authoredThreshold = reference * opacity;
-                bounded &= threshold <= authoredThreshold && authoredThreshold - threshold < 1;
-                for (unsigned texel = reference; texel < 256; ++texel) {
-                    retained &= texel * opacity >= threshold;
-                }
+        const float reference = C::silhouetteCutoutReference;
+        Check(0 < reference + 1, "empty texture pixels do not write native depth");
+        bool visibleDepth = true;
+        bool blendRoute = true;
+        for (unsigned step = 1; step <= 256; ++step) {
+            const float requested = step / 256.0f;
+            const float opacity = C::ObjectFadeOpacity(requested);
+            blendRoute &= opacity > 0 && opacity < 1;
+            for (unsigned texel = 0; texel <= 255; ++texel) {
+                const bool writesDepth = texel >= reference + 1;
+                const bool contributesColour = texel * opacity > 0 && texel * opacity >= reference;
+                visibleDepth &= !writesDepth || contributesColour;
             }
         }
-        Check(retained, "every originally accepted texel remains accepted throughout fade");
-        Check(bounded, "fade reference quantization stays within one native byte step");
-        Check(fullOpacityUnchanged, "full-opacity cutout preserves every authored reference");
+        Check(visibleDepth, "every depth-writing texel contributes colour throughout fade");
+        Check(blendRoute, "all visible requested opacities retain native blended fade");
+        Check(C::ObjectFadeOpacity(0) == 0, "zero opacity remains invisible");
+        Check(C::ObjectFadeOpacity(0.5f) == 0.5f, "ordinary requested opacity is unchanged");
+        Check(1 - C::ObjectFadeOpacity(1) < 0.0000001f,
+            "full requested opacity differs by less than one ten-millionth");
     }
+
 }
 
 int main()
 {
     SurfaceSelection();
-    CutoutFade();
+    NativeFadeCoverage();
     if (failures) return 1;
-    std::puts("Surface selection and fade-independent cutout coverage passed");
+    std::puts("Surface selection and native fade coverage contracts passed");
     return 0;
 }

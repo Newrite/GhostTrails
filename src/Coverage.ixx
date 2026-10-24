@@ -38,22 +38,18 @@ export namespace GhostTrails::Coverage
         return std::nullopt;
     }
 
-    // The lighting shader tests textureAlpha * materialAlpha against an 8-bit
-    // reference. Scale that reference with the ghost fade so an opaque strand
-    // does not disappear while the requested material opacity is still visible.
-    class Cutout
+    // Both passes share NiAlphaProperty, but only the colour shader multiplies
+    // texture alpha by object fade. A positive shared cutoff would therefore
+    // produce invisible depth-writing texels as the ghost fades. Zero keeps
+    // soft coverage in colour; native Utility depth rejects alpha below 1/255.
+    inline constexpr std::uint8_t silhouetteCutoutReference = 0;
+
+    constexpr float ObjectFadeOpacity(float opacity)
     {
-    public:
-        explicit constexpr Cutout(std::uint8_t reference) : reference_(reference) {}
-
-        // opacity is already validated by request admission / lifetime sampling.
-        // Rounding down does not reject texels that passed the authored cutoff.
-        constexpr std::uint8_t Reference(float opacity) const
-        {
-            return static_cast<std::uint8_t>(reference_ * opacity);
-        }
-
-    private:
-        std::uint8_t reference_;
-    };
+        // Admission guarantees [0,1]. Keep even requested opacity 1 in the
+        // native fade route, which requires strictly less than one. Otherwise
+        // blended hair switches to the opaque route for its first frame.
+        constexpr float maximumBlendedFade = 0x1.fffffep-1f;
+        return opacity == 1 ? maximumBlendedFade : opacity;
+    }
 }

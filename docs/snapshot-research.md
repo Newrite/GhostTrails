@@ -148,6 +148,9 @@ tests. A successful DLL build does not verify them.
 
 ## Rendering regression and native material revision (1.0.3)
 
+This section records the 1.0.3 implementation. Its per-material fade and
+Cutout policy are superseded by the 1.0.4 section below.
+
 The user observed a visible ghost in 1.0.1, with an overly bright body and faint
 hair/boots. The old screenshot shows hair around the whole head; no missing
 hair patch was established. In 1.0.2 the ghost disappeared and vegetation turned
@@ -190,6 +193,66 @@ reference across all 256 authored reference values and 65 fade samples. These
 CPU checks do not verify native material setup, pass ordering, hair/boot density,
 internal facial surfaces or vegetation in the game. All still need runtime
 verification on the new DLL.
+
+## Native object fade and hair tint (1.0.4)
+
+The user's 1.0.3 screenshots confirm improved body/armor visibility but show
+mouth and eyes through the back of the head. The supplied log confirms the
+head, mouth, eyes and Dint HairTint surfaces were captured. CommonLib's
+NiAVObject::UpdateHairColor writes BSLightingShaderMaterialHairTint::tintColor.
+Surface::ApplyColor now performs that same assignment on the uniquely cloned
+material; it does not edit actor/NPC data or source textures.
+
+The ordinary engine object-fade route was inspected in all three binaries:
+
+| Runtime | Lighting GetRenderPasses | Transparent rendering stage | Fade control byte |
+|---|---|---|---|
+| SE | `0x1412C6200` | `0x1412CB2E0` | node `+0x154` |
+| AE 1.6.1170 | `0x1414ADFB0` | `0x1414B3390` | node `+0x154` |
+| VR | `0x1413045F0` | `0x1413099C0` | node `+0x17C` |
+
+With currentFade below one, explicit alpha blending disabled, screen-door
+disabled and the private node's alternative-fade byte zero, the lighting
+property emits colour hint 9 and Utility depth hint 14. SE accumulation
+`0x1412CA300` routes these to groups 7 and 11. All three rendering stages
+draw group 11 before group 7. SE alpha-state setup `0x14131F440` enables
+ordinary colour blending from property alpha even with the explicit blend bit
+off. Setting alpha to one would instead choose opaque rendering; the plugin
+maps that endpoint to the next smaller float (difference below 0.0000001).
+
+SE state construction `0x140D88C90` identifies depth mode 3 as write-enabled
+LESS_EQUAL and mode 1 as read-only LESS_EQUAL. The ordinary opaque stage leaves
+mode 3 for the depth group; colour group 7 selects mode 1 and restores mode 3.
+The special render flag 0x40 can leave mode 1 before the depth group. Therefore
+ordinary world ordering is supported by static evidence, but all camera modes
+and third-party render changes are not proven. This is shared scene depth,
+not a per-ghost depth target: overlapping ghosts and later alpha effects can
+occlude each other. No engine globals or graphics API state are edited here.
+
+The native empty fade-node prototype is cloned once per pooled ghost. It stays
+detached, with a NiPointer owner declared before the graph so every shader
+borrow dies first. CreateFadeControl rejects nonempty/controller-bearing or
+aliased prototypes. The alternative-fade byte is set through CommonLib's
+runtime accessor, whose field is still named unk154. Its behavior, not a
+guessed semantic name, justifies the write. Native AttachChild only changes
+parent/child relationships and does not replace these shader fade pointers.
+
+Lighting colour tests texture alpha multiplied by fade; Utility depth does not
+multiply texture alpha by fade. The previous scaled positive cutoff would
+write invisible depth (e.g. reference 128, fade 0.5, texture alpha 80/255).
+The new shared reference is zero: colour retains soft coverage, while native
+Utility setup `0x14130EC70` uses approximately (reference+1)/255 for non-blended
+depth, excluding empty texels. Blended-only cards are promoted to alpha test
+as well. This deliberately admits soft texels below the original authored
+cutoff. Tiny filtered alpha below 1/255 can contribute colour without depth;
+the shader paths do not provide identical sub-byte edge coverage.
+
+MaterialTests now covers the invisible-depth regression and all nonzero 8-bit
+texels over 256 fade samples, including the alpha=1 route boundary. It is a
+CPU model of the audited shader contracts, not a render test. Diagnostic builds
+log pass hints and fade-node identity once after each spawn. Live validation
+must check rear-view head occlusion, hair edges/colour, overlapping ghosts,
+vegetation, first-person views, unloading and CS/ENB coexistence.
 
 ## Asynchronous alternative and remaining validation
 

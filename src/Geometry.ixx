@@ -313,6 +313,8 @@ namespace GhostTrails::Geometry
 
     struct Ghost
     {
+        // Declared first so the graph and all shader borrows die before it.
+        RE::NiPointer<RE::BSFadeNode> fade;
         RE::NiPointer<RE::NiNode> root;
         RE::NiPointer<RE::NiNode> parent;
         // Bindings borrow the pool's retained source nodes and this owned root.
@@ -327,6 +329,9 @@ namespace GhostTrails::Geometry
             float lifetime;
             API::Appearance look;
             std::uint32_t request;
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+            bool passesLogged{};
+#endif
         };
         std::optional<Active> active;
 
@@ -334,7 +339,7 @@ namespace GhostTrails::Geometry
         Ghost(const Ghost&) = delete;
         Ghost& operator=(const Ghost&) = delete;
         Ghost(Ghost&&) = default;
-        Ghost& operator=(Ghost&&) = default;
+        Ghost& operator=(Ghost&&) = delete;
         ~Ghost() { Detach(); }
 
         void Detach()
@@ -349,8 +354,14 @@ namespace GhostTrails::Geometry
 
         void ApplyLook(const API::Appearance& look, float visibility)
         {
+            const float opacity = Coverage::ObjectFadeOpacity(look.alpha * visibility);
+            auto& fadeState = fade->GetRuntimeData();
+            fadeState.currentFade = opacity;
+            // Alternate channel is multiplied only for selected LOD passes;
+            // keep it neutral to avoid applying the same opacity twice.
+            fadeState.unk14C = 1;
             for (auto& surface : surfaces) {
-                *surface.emissive = {look.red, look.green, look.blue};
+                surface.ApplyColor({look.red, look.green, look.blue});
                 surface.property->emissiveMult = look.intensity;
                 // Invalidate cached render passes when the requested shader
                 // variant changes between uses of an inactive pooled ghost.
@@ -359,9 +370,28 @@ namespace GhostTrails::Geometry
                     surface.property->SetFlags(RE::BSShaderProperty::EShaderPropertyFlag8::kRimLighting, rim);
                 }
                 surface.material->rimLightPower = look.rimPower;
-                surface.ApplyOpacity(look.alpha * visibility);
             }
         }
+
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+        void LogRenderedPasses()
+        {
+            // Called once on the next update after attachment. Empty lists can
+            // mean the ghost was culled; this is evidence, not a render test.
+            for (const auto& surface : surfaces) {
+                std::uint32_t depth = 0, colour = 0, other = 0;
+                const auto* first = surface.property->renderPassList.head;
+                for (auto* pass = first; pass; pass = pass->next) {
+                    if (pass->accumulationHint == 14) ++depth;
+                    else if (pass->accumulationHint == 9) ++colour;
+                    else ++other;
+                }
+                logger::debug("request={} native fade passes '{}': depth14={} colour9={} other={} ownedFade={} opacity={}",
+                    active->request, first && first->geometry ? Name(*first->geometry) : "<not accumulated>",
+                    depth, colour, other, surface.property->fadeNode == fade.get(), surface.property->alpha);
+            }
+        }
+#endif
     };
 }
 
@@ -507,7 +537,14 @@ export namespace GhostTrails::Geometry
                 if (!white_) logger::warn("Ghost white texture unavailable: source diffuse textures retained");
             }
 
+            auto fade = Materials::CreateFadeControl();
+            if (!fade) {
+                logger::warn("Ghost clone failed: {}", Materials::Describe(fade.error()));
+                return std::unexpected(Error::CloneFailed);
+            }
+
             Ghost ghost;
+            ghost.fade = std::move(*fade);
             ghost.root = std::move(clone.root);
             ghost.root->GetFlags().set(Flag::kHidden);
             std::unordered_map<RE::NiAVObject*, RE::NiAVObject*> originals;
@@ -550,7 +587,7 @@ export namespace GhostTrails::Geometry
                     } else if (!BindSkin(*original, *geometry, clone.pairs, transforms, *ghost.root)) {
                         binding.hidden = true;
                         logger::warn("Ghost surface '{}' omitted: skin is shared or references a bone outside the source graph", Name(*target));
-                    } else if (auto surface = Materials::MakeSurface(*original, *geometry, white_)) {
+                    } else if (auto surface = Materials::MakeSurface(*original, *geometry, white_, *ghost.fade)) {
                         ghost.surfaces.push_back(*surface);
                         if (auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get()) ghost.skins.push_back(skin);
                     } else {
@@ -652,6 +689,12 @@ export namespace GhostTrails::Geometry
         {
             for (auto& ghost : ghosts_) {
                 if (!ghost.active) continue;
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+                if (!ghost.active->passesLogged) {
+                    ghost.LogRenderedPasses();
+                    ghost.active->passesLogged = true;
+                }
+#endif
                 const auto elapsed = static_cast<float>(now - ghost.active->born);
                 if (elapsed >= ghost.active->lifetime) {
                     ghost.Detach();

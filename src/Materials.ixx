@@ -15,6 +15,12 @@ namespace GhostTrails::Materials
         constexpr auto LightingFactory = REL::VariantID(99847, 106492, 0x1302ED0);
     }
 
+    RE::NiPointer<RE::BSLightingShaderProperty> CreateProperty()
+    {
+        static const REL::Relocation<RE::BSLightingShaderProperty*()> create{Address::LightingFactory};
+        return RE::NiPointer<RE::BSLightingShaderProperty>{create()};
+    }
+
     export struct Surface
     {
         // Pointers borrow the ghost's owned scene graph.
@@ -22,17 +28,16 @@ namespace GhostTrails::Materials
         RE::BSLightingShaderProperty* property;
         RE::BSLightingShaderMaterialBase* material;
         RE::NiColor* emissive;
-        RE::NiAlphaProperty* alpha;
-        std::optional<Coverage::Cutout> cutout;
+        RE::NiColor* hairTint; // Optional borrow: only native HairTint materials have this field.
 
-        void ApplyOpacity(float opacity) const
+        void ApplyColor(const RE::NiColor& color) const
         {
-            material->materialAlpha = opacity;
-            if (cutout) alpha->alphaThreshold = cutout->Reference(opacity);
+            *emissive = color;
+            if (hairTint) *hairTint = color;
         }
     };
 
-    export enum class SurfaceError { MissingMaterial, SharedMaterial, Allocation, SetupFailed, MissingRimTexture };
+    export enum class SurfaceError { MissingMaterial, SharedMaterial, Allocation, FadeControl, SetupFailed, MissingRimTexture };
 
     export const char* Describe(SurfaceError error)
     {
@@ -40,14 +45,42 @@ namespace GhostTrails::Materials
         case SurfaceError::MissingMaterial: return "lighting/effect material unavailable";
         case SurfaceError::SharedMaterial: return "native material copy aliases a source/default material";
         case SurfaceError::Allocation: return "material or property allocation failed";
+        case SurfaceError::FadeControl: return "native empty fade-node prototype could not be cloned independently";
         case SurfaceError::SetupFailed: return "native geometry setup failed";
         case SurfaceError::MissingRimTexture: return "native geometry setup left the rim texture empty";
         }
         return "unknown surface error";
     }
 
+    export std::expected<RE::NiPointer<RE::BSFadeNode>, SurfaceError> CreateFadeControl()
+    {
+        const auto property = CreateProperty();
+        if (!property) return std::unexpected(SurfaceError::Allocation);
+        auto* prototype = property->fadeNode;
+        if (!prototype || prototype->GetChildren().size() != 0 || prototype->controllers) {
+            return std::unexpected(SurfaceError::FadeControl);
+        }
+
+        RE::NiCloningProcess process{};
+        process.copyType = 1;
+        process.scale = {1, 1, 1};
+        RE::NiPointer<RE::NiObject> clone{prototype->CreateClone(process)};
+        if (clone) prototype->ProcessClone(process);
+        auto* node = netimmerse_cast<RE::BSFadeNode*>(clone.get());
+        if (!node || node == prototype) return std::unexpected(SurfaceError::FadeControl);
+
+        auto& state = node->GetRuntimeData();
+        state.currentFade = 1;
+        state.unk14C = 1;
+        // Audited on SE/AE (+0x154) and VR (+0x17C): this byte selects
+        // alternative/dither fade. Zero selects ordinary depth + colour fade.
+        // The controller stays detached, so scene traversal cannot update it.
+        state.unk154 = 0;
+        return RE::NiPointer<RE::BSFadeNode>{node};
+    }
+
     export std::expected<Surface, SurfaceError> MakeSurface(RE::BSGeometry& source, RE::BSGeometry& copy,
-                                                    const RE::NiPointer<RE::NiSourceTexture>& white)
+        const RE::NiPointer<RE::NiSourceTexture>& white, RE::BSFadeNode& fade)
     {
         auto* original = netimmerse_cast<RE::BSLightingShaderProperty*>(source.GetGeometryRuntimeData().shaderProperty.get());
         auto* effect = netimmerse_cast<RE::BSEffectShaderProperty*>(source.GetGeometryRuntimeData().shaderProperty.get());
@@ -55,9 +88,9 @@ namespace GhostTrails::Materials
             return std::unexpected(SurfaceError::MissingMaterial);
         }
 
-        static const REL::Relocation<RE::BSLightingShaderProperty*()> create{Address::LightingFactory};
-        RE::NiPointer<RE::BSLightingShaderProperty> property{create()};
+        auto property = CreateProperty();
         if (!property || !property->material) return std::unexpected(SurfaceError::Allocation);
+        property->fadeNode = &fade; // Ghost owns the detached controller beyond the cloned graph.
 
         // Lit meshes keep their native material subclass. Effect-shaded armor
         // keeps its geometry/skin but uses the factory's ordinary lit material.
@@ -105,18 +138,21 @@ namespace GhostTrails::Materials
         static const REL::Relocation<RE::NiAlphaProperty*()> createAlpha{Address::AlphaFactory};
         RE::NiPointer<RE::NiAlphaProperty> alpha{createAlpha()};
         if (!alpha) return std::unexpected(SurfaceError::Allocation);
-        std::optional<Coverage::Cutout> cutout;
         if (originalData.alphaProperty) {
             alpha->alphaFlags = originalData.alphaProperty->alphaFlags;
-            alpha->alphaThreshold = originalData.alphaProperty->alphaThreshold;
-            if (originalData.alphaProperty->GetAlphaTesting()) cutout.emplace(alpha->alphaThreshold);
-        } else {
-            alpha->SetAlphaTesting(false);
         }
-        alpha->SetAlphaBlending(true);
+        alpha->SetAlphaTesting(textureCoverage);
+        // A fixed positive or fade-scaled threshold makes depth and colour
+        // coverage disagree: only colour includes the fade multiplier. Keep
+        // soft strands and let native Utility reject empty texture pixels.
+        alpha->alphaThreshold = Coverage::silhouetteCutoutReference;
+        constexpr std::uint16_t testFunctionMask = 7u << 10;
+        alpha->alphaFlags = (alpha->alphaFlags & ~testFunctionMask) |
+            (static_cast<std::uint16_t>(RE::NiAlphaProperty::TestFunction::kGreaterEqual) << 10);
+        // Native object fade emits a depth prepass only without this bit.
+        // The engine enables colour blending from the fade node's opacity.
+        alpha->SetAlphaBlending(false);
         alpha->SetSrcBlendMode(RE::NiAlphaProperty::AlphaFunction::kSrcAlpha);
-        // Ordinary alpha composition avoids adding every head/body layer's
-        // full brightness over the scene, which exaggerated their difference.
         alpha->SetDestBlendMode(RE::NiAlphaProperty::AlphaFunction::kInvSrcAlpha);
 
         auto& data = copy.GetGeometryRuntimeData();
@@ -136,9 +172,13 @@ namespace GhostTrails::Materials
         logger::debug("Ghost material '{}': feature={} authoredAlphaFlags={:04X} authoredThreshold={} cutout={} vertexColoursIgnored=true",
             source.name.c_str(), static_cast<unsigned>(material->GetFeature()),
             originalData.alphaProperty ? originalData.alphaProperty->alphaFlags : 0,
-            originalData.alphaProperty ? originalData.alphaProperty->alphaThreshold : 0, cutout.has_value());
+            originalData.alphaProperty ? originalData.alphaProperty->alphaThreshold : 0, textureCoverage);
 #endif
-        return Surface{property.get(), material, property->emissiveColor, alpha.get(), cutout};
+        // Same field as NiAVObject::UpdateHairColor, but restricted to this
+        // surface's unique cloned material. Never recolour the live actor.
+        auto* hairTint = material->GetFeature() == RE::BSShaderMaterial::Feature::kHairTint
+            ? &static_cast<RE::BSLightingShaderMaterialHairTint*>(material)->tintColor : nullptr;
+        return Surface{property.get(), material, property->emissiveColor, hairTint};
     }
 
 }
