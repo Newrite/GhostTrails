@@ -24,6 +24,6 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\API.md') -Destination $sdk
 Copy-Item -Path (Join-Path $projectRoot 'docs\*.md') -Destination $docs
 Copy-Item -LiteralPath (Join-Path $projectRoot 'examples\NativeConsumer.ixx') -Destination $sdk
-$archive = Join-Path $projectRoot ('dist\GhostTrails-1.0.0-' + $variant + '.zip')
+$archive = Join-Path $projectRoot ('dist\GhostTrails-1.0.1-' + $variant + '.zip')
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
 Get-Item -LiteralPath $archive | Select-Object FullName,Length

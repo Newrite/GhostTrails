@@ -101,6 +101,48 @@ particles, overlays, invisible surfaces and decals stay hidden. Native lighting
 materials remain lighting materials; effect-shaded armor is rendered through a
 fresh lighting property, retaining its native mesh and skin.
 
+## Rim-lighting initialization and first visible spawn
+
+The SE crash recorded on 2026-10-24 at 19:02:18 occurred in lighting material
+setup at `SkyrimSE.exe+0x12F27E5` (IDA `0x1412F27E5`). The preceding instructions
+load `[material+0x60]`, then dereference its renderer data at `+0x48`. The exception
+registers show a null texture, matching `BSLightingShaderMaterialBase::rimSoftLightingTexture`.
+The heap holding the material is absent from the supplied minidump, so the dump
+alone cannot establish that material's ownership. CrashLogger reports a property
+with the rim flag set. The preceding successful API requests were `Prepare`
+operations; they had not attached visible silhouettes.
+
+SE `BSLightingShaderProperty::FinishSetupGeometry` (`0x1412C5470`, body
+`0x1412C56D0`) passes the existing rim/soft/back-light flags into
+`BSLightingShaderMaterialBase::ReceiveValuesFromRootMaterial` (`0x1412CF660`).
+That method supplies a default texture for an empty rim/soft slot only when
+one of the corresponding flags is already set. Version 1.0.0 enabled rim later
+in `Ghost::ApplyLook`, after geometry setup. A source surface without a rim map
+therefore reached the renderer with the flag enabled and its texture null.
+The old Dodge code enabled the flag before its native setup calls.
+
+Version 1.0.1 provisions rim resources on every detached pooled surface during
+`MakeSurface`, before `FinishSetupGeometry`. A surface still missing that texture
+is hidden with a specific warning. Appearance changes use CommonLib's `SetFlags`
+to invalidate cached render passes when toggling rim, retaining the prepared
+texture across uses. The SE setter (`0x141291C30`) resets `lastRenderPassState`
+to `INT32_MAX` when the flag changes. No additional cloning or texture loading
+is needed for an appearance change at spawn.
+
+Runtime regression checks still required on SE, AE and VR:
+
+1. Prepare a slot from equipment without rim lighting, then trigger the first
+   perfect-dodge Spawn with the default positive rim power. Prepare must remain
+   invisible; Spawn must render and fade without a lighting-material crash.
+2. Reuse that slot with rim power `0`, then positive, then `0` again. Confirm
+   both the visible effect and the shader variant update on each transition.
+3. Repeat with changing equipment and embedded arrows, both with and without
+   Community Shaders. Missing resources must omit and identify the affected
+   surface rather than attach it with a null required texture.
+
+These are manual engine checks, not checks covered by the mailbox/timeline unit
+tests. A successful DLL build does not verify them.
+
 ## Asynchronous alternative and remaining validation
 
 The inspected SE BGSArtObjectCloneTask vtable leads to `0x14020A030`, which

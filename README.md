@@ -81,6 +81,8 @@ xmake run GhostTrails.SDKConsumer
 Такая DLL находится в `build/diagnostics/windows/x64/releasedbg`.
 Обычные ошибки, причины отказа и итоги запросов остаются в обеих сборках
 в `<Documents>/My Games/<runtime>/SKSE/GhostTrails.log`.
+Итоги содержат `operation=Prepare` и `prepared` для прогрева без отображения;
+`operation=Spawn` и `spawned` означают присоединенные к сцене фантомы.
 
 Papyrus компилируется `housecarl_compile_script` из
 `scripts/Source/GhostTrails.psc` с `out_path=<project>/dist` и каталогом

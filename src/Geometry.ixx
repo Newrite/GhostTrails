@@ -239,7 +239,18 @@ namespace GhostTrails::Geometry
         RE::NiColor* emissive;
     };
 
-    enum class SurfaceError { MissingMaterial, Allocation };
+    enum class SurfaceError { MissingMaterial, Allocation, SetupFailed, MissingRimTexture };
+
+    const char* Describe(SurfaceError error)
+    {
+        switch (error) {
+        case SurfaceError::MissingMaterial: return "lighting/effect material unavailable";
+        case SurfaceError::Allocation: return "material or property allocation failed";
+        case SurfaceError::SetupFailed: return "native geometry setup failed";
+        case SurfaceError::MissingRimTexture: return "native geometry setup left the rim texture empty";
+        }
+        return "unknown surface error";
+    }
 
     std::expected<Surface, SurfaceError> MakeSurface(RE::BSGeometry& source, RE::BSGeometry& copy,
                                                     const RE::NiPointer<RE::NiSourceTexture>& white)
@@ -271,7 +282,11 @@ namespace GhostTrails::Geometry
         if (effect && effect->flags.all(ShaderFlag::kTwoSided)) property->flags.set(ShaderFlag::kTwoSided);
         if (source.GetGeometryRuntimeData().skinInstance) property->flags.set(ShaderFlag::kSkinned);
         property->flags.reset(ShaderFlag::kCastShadows, ShaderFlag::kReceiveShadows, ShaderFlag::kSpecular);
-        property->flags.set(ShaderFlag::kZBufferTest, ShaderFlag::kZBufferWrite, ShaderFlag::kNoFade, ShaderFlag::kOwnEmit);
+        // Prepare has no appearance yet. Provision rim resources before native
+        // FinishSetupGeometry, even when the source never used rim lighting.
+        // Enabling it only in Spawn leaves material+0x60 null for the renderer.
+        property->flags.set(ShaderFlag::kZBufferTest, ShaderFlag::kZBufferWrite, ShaderFlag::kNoFade,
+                            ShaderFlag::kOwnEmit, ShaderFlag::kRimLighting);
         property->alpha = 1;
         if (!property->emissiveColor) {
             auto* color = RE::malloc<RE::NiColor>();
@@ -296,8 +311,10 @@ namespace GhostTrails::Geometry
         auto& data = copy.GetGeometryRuntimeData();
         data.alphaProperty = alpha;
         data.shaderProperty = property;
-        property->SetupGeometry(&copy);
-        property->FinishSetupGeometry(&copy);
+        if (!property->SetupGeometry(&copy) || !property->FinishSetupGeometry(&copy)) {
+            return std::unexpected(SurfaceError::SetupFailed);
+        }
+        if (!material->rimSoftLightingTexture) return std::unexpected(SurfaceError::MissingRimTexture);
         return Surface{property.get(), material, property->emissiveColor};
     }
 
@@ -414,7 +431,12 @@ namespace GhostTrails::Geometry
             for (auto& surface : surfaces) {
                 *surface.emissive = {look.red, look.green, look.blue};
                 surface.property->emissiveMult = look.intensity;
-                surface.property->flags.set(look.rimPower > 0, ShaderFlag::kRimLighting);
+                // Invalidate cached render passes when the requested shader
+                // variant changes between uses of an inactive pooled ghost.
+                const bool rim = look.rimPower > 0;
+                if (surface.property->flags.all(ShaderFlag::kRimLighting) != rim) {
+                    surface.property->SetFlags(RE::BSShaderProperty::EShaderPropertyFlag8::kRimLighting, rim);
+                }
                 surface.material->rimLightPower = look.rimPower;
                 surface.material->materialAlpha = look.alpha * visibility;
             }
@@ -612,7 +634,7 @@ export namespace GhostTrails::Geometry
                         if (auto* skin = geometry->GetGeometryRuntimeData().skinInstance.get()) ghost.skins.push_back(skin);
                     } else {
                         binding.hidden = true;
-                        logger::warn("Ghost surface '{}' omitted: material or alpha property allocation/setup failed", Name(*target));
+                        logger::warn("Ghost surface '{}' omitted: {}", Name(*target), Describe(surface.error()));
                     }
                     if (binding.hidden) {
                         target->GetFlags().set(Flag::kHidden);

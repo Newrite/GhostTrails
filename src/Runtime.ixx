@@ -80,8 +80,9 @@ export namespace GhostTrails
                 requests_.Publish(request.id, timeline.Status());
                 if (timeline.Finished()) {
                     const auto result = timeline.Status();
-                    logger::info("request={} actor={:08X} finished state={} created={} missed={} attempts={} lastFailure={}",
-                        request.id, request.actor, static_cast<unsigned>(result.state), result.spawned,
+                    logger::info("request={} operation={} actorHandle={:08X} finished state={} {}={} missed={} attempts={} lastFailure={}",
+                        request.id, request.prepare ? "Prepare" : "Spawn", request.actor,
+                        static_cast<unsigned>(result.state), request.prepare ? "prepared" : "spawned", result.spawned,
                         result.missed, result.attempts, static_cast<unsigned>(result.lastFailure));
                     work_.erase(it);
                 }

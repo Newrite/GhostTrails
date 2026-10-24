@@ -159,7 +159,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     if (!SetupLog()) return false;
     SKSE::Init(skse, false);
-    logger::info("GhostTrails 1.0.0 loading");
+    logger::info("GhostTrails 1.0.1 loading");
     plugin = std::make_unique<Plugin>(GhostTrails::ReadSettings());
     GhostTrails::Bindings::Bind(plugin->requests);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
