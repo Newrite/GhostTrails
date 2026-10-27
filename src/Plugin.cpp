@@ -27,6 +27,7 @@ namespace
         bool updateEntered{};
         bool updateReturned{};
         std::optional<std::uint32_t> readiness;
+        std::optional<bool> paused;
 #endif
     };
 
@@ -76,22 +77,23 @@ namespace
 #endif
     }
 
-    struct TaskUpdate
+    struct FrameUpdate
     {
-        static void Thunk(void* taskPool)
+        static void Thunk(void* platform)
         {
 #ifdef GHOSTTRAILS_DIAGNOSTICS
             if (!plugin->updateEntered) {
                 plugin->updateEntered = true;
-                logger::debug("Task queue first entry: operational={} initialized={}", plugin->operational, plugin->initialized);
+                logger::debug("Frame synchronization first entry: operational={} initialized={}", plugin->operational, plugin->initialized);
             }
 #endif
-            // Includes SKSE's queued AddTask callbacks and any earlier hooks.
-            original(taskPool);
+            // Continue the native platform update and earlier hooks (including
+            // FSMP's frame synchronization) before reading the scene pose.
+            original(platform);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
             if (!plugin->updateReturned) {
                 plugin->updateReturned = true;
-                logger::debug("Task queue chained call first return");
+                logger::debug("Frame synchronization chained call first return");
             }
 #endif
             if (!plugin->operational) return;
@@ -148,7 +150,15 @@ namespace
 #endif
             if (ready) {
                 const bool paused = currentUI && currentUI->GameIsPaused();
-                plugin->runtime.Tick(paused ? 0.0f : RE::Main::QFrameAnimTime());
+                const float delta = paused ? 0.0f : RE::Main::QFrameAnimTime();
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+                if (plugin->paused != paused) {
+                    plugin->paused = paused;
+                    logger::debug("Frame tick mode: paused={} delta={} thread={} mainThread={}",
+                        paused, delta, REX::W32::GetCurrentThreadId(), main->threadID);
+                }
+#endif
+                plugin->runtime.Tick(delta);
             }
         }
 
@@ -158,12 +168,12 @@ namespace
         static void LogHookSite()
         {
             if (!site) {
-                logger::debug("Task queue hook awaits InputLoaded");
+                logger::debug("Frame synchronization hook awaits InputLoaded");
                 return;
             }
             std::array<std::uint8_t, 5> bytes{};
             std::memcpy(bytes.data(), reinterpret_cast<const void*>(site), bytes.size());
-            logger::debug("Task queue hook check: site={:X} bytes={:02X} {:02X} {:02X} {:02X} {:02X} changed={} entered={} returned={}",
+            logger::debug("Frame synchronization hook check: site={:X} bytes={:02X} {:02X} {:02X} {:02X} {:02X} changed={} entered={} returned={}",
                 site, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes != installedBytes,
                 plugin->updateEntered, plugin->updateReturned);
         }
@@ -187,7 +197,7 @@ namespace
         static inline REL::Relocation<decltype(Thunk)> original;
     };
 
-    bool InstallTaskHook()
+    bool InstallFrameHooks()
     {
         const auto version = REL::Module::get().version();
         const bool known = (REL::Module::IsSE() && version == REL::Version{1, 5, 97, 0}) ||
@@ -198,29 +208,30 @@ namespace
             return false;
         }
 
-        // SKSE Hooks_Threads.cpp's primary ProcessTasks call, after the job
-        // synchronization phase. InputLoaded occurs after SKSE commits it.
+        // Unconditional platform call in Main::Update, after the job-wait
+        // phase. The SKSE queue call in this function is pause-only; its other
+        // queue call runs from a job. Chain here on the game thread instead.
         const REL::Relocation<std::uintptr_t> update{REL::VariantID{35565, 36564, 0x5BAB10}};
-        const auto call = update.address() + REL::Relocate(0x6B8, 0xB9C, 0x75E);
+        const auto call = update.address() + REL::Relocate(0x56D, 0x9DC, 0x611);
         const REL::Relocation<std::uintptr_t> winMain{REL::VariantID{35545, 36544, 0x5B4290}};
         const auto shutdown = winMain.address() + REL::Relocate(0x35, 0x1AE, 0x35);
         if (*reinterpret_cast<const std::uint8_t*>(call) != 0xE8 ||
             *reinterpret_cast<const std::uint8_t*>(shutdown) != 0xE8) {
-            logger::error("Task queue/shutdown call encoding unavailable at {:X}/{:X}; plugin disabled", call, shutdown);
+            logger::error("Frame synchronization/shutdown call encoding unavailable at {:X}/{:X}; plugin disabled", call, shutdown);
             return false;
         }
 
         SKSE::AllocTrampoline(128);
-        TaskUpdate::original = SKSE::GetTrampoline().write_call<5>(call, TaskUpdate::Thunk);
+        FrameUpdate::original = SKSE::GetTrampoline().write_call<5>(call, FrameUpdate::Thunk);
         Shutdown::original = SKSE::GetTrampoline().write_call<5>(shutdown, Shutdown::Thunk);
-        logger::info("Task queue and shutdown hooks installed; runtime {}", version.string());
+        logger::info("Frame synchronization and shutdown hooks installed; runtime {}", version.string());
 #ifdef GHOSTTRAILS_DIAGNOSTICS
-        TaskUpdate::site = call;
-        std::memcpy(TaskUpdate::installedBytes.data(), reinterpret_cast<const void*>(call), TaskUpdate::installedBytes.size());
-        logger::debug("Task queue hook addresses: site={:X} previous={:X} thunk={:X}; shutdown={:X} previous={:X}",
-            call, TaskUpdate::original.address(), reinterpret_cast<std::uintptr_t>(&TaskUpdate::Thunk),
+        FrameUpdate::site = call;
+        std::memcpy(FrameUpdate::installedBytes.data(), reinterpret_cast<const void*>(call), FrameUpdate::installedBytes.size());
+        logger::debug("Frame synchronization hook addresses: site={:X} previous={:X} thunk={:X}; shutdown={:X} previous={:X}",
+            call, FrameUpdate::original.address(), reinterpret_cast<std::uintptr_t>(&FrameUpdate::Thunk),
             shutdown, Shutdown::original.address());
-        TaskUpdate::LogHookSite();
+        FrameUpdate::LogHookSite();
 #endif
         return true;
     }
@@ -232,11 +243,11 @@ namespace
         logger::debug("SKSE message: type={} operational={} updateEntered={} geometry={} epoch={}",
             message->type, plugin->operational, plugin->updateEntered, plugin->geometryReady,
             plugin->requests.Session().epoch);
-        TaskUpdate::LogHookSite();
+        FrameUpdate::LogHookSite();
 #endif
         switch (message->type) {
         case SKSE::MessagingInterface::kInputLoaded:
-            if (plugin->callbacksReady && !TaskUpdate::original.address()) plugin->operational = InstallTaskHook();
+            if (plugin->callbacksReady && !FrameUpdate::original.address()) plugin->operational = InstallFrameHooks();
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
             Transition(false, true);
@@ -260,7 +271,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     if (!SetupLog()) return false;
-    logger::info("GhostTrails 1.0.6 load entry; logger ready");
+    logger::info("GhostTrails 1.0.7 load entry; logger ready");
     SKSE::Init(skse, false);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
     logger::debug("SKSE initialization complete; diagnostics enabled unconditionally");
@@ -286,6 +297,6 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     serialization->SetUniqueID(0x4754524C); // GTRL; transient geometry is never saved.
     serialization->SetRevertCallback(Revert);
     plugin->callbacksReady = true;
-    logger::info("GhostTrails initialization complete; awaiting InputLoaded to chain SKSE task processing");
+    logger::info("GhostTrails initialization complete; awaiting InputLoaded to chain frame synchronization");
     return true;
 }

@@ -274,28 +274,39 @@ sessions, native resource reclamation and coexistence with other clone hooks.
 Static analysis does not prove recovery from an engine access violation or a
 corrupt third-party mesh; the typed failure paths cover failures the engine
 returns and incompatible source/clone relationships detected before attachment.
-# Task queue update boundary (1.0.6)
 
-The primary `ProcessTasks` call from SKSE `Hooks_Threads.cpp` is the update
-boundary. IDA confirms each call in the late task-processing phase of
-`Main::Update`, after the job synchronization calls:
+# Frame synchronization update boundary (1.0.7)
 
-| Runtime | Function | Offset | Call address in IDA |
-| --- | --- | --- | --- |
-| SE 1.5.97 | ID 35565 | `0x6B8` | `0x1405B36A8` |
-| AE 1.6.1170 | ID 36564 | `0xB9C` | `0x140646A3C` |
-| VR 1.4.15 | RVA `0x5BAB10` | `0x75E` | `0x1405BB26E` |
+The previous task queue boundary was incorrect for a continuous update.
+IDA shows that the ProcessTasks call inside Main::Update is under
+`if (!gameplayUpdate)`, where gameplayUpdate is `!paused && !freezeTime`.
+The other SKSE task queue call is reached from Job_Post_process (SE
+`0x140640DB0`), after waiting for job 20. Hooking only the former accumulated
+requests during gameplay and processed them on Escape; paused lifetime
+advancement then kept the ghosts on screen. This was reproduced in the
+user's 1.0.6 log, not a broken hook chain.
 
-SKSE initializes plugins and sends PostLoad/PostPostLoad before committing
-its thread hooks (`skse64.cpp` / `PluginManager.cpp`, SKSE 2.0.20 sources).
-Install at InputLoaded so CommonLib returns the installed SKSE handler.
-Call that handler first, including its AddTask work, then update the phantom
-owner. Only the primary site advances the owner; the secondary task site is
-left alone. No self-rescheduling AddTask loop is used.
+Use the unconditional platform update call inside Main::Update after the
+job-wait phase instead, on the same thread as Main::Update. IDA confirms:
 
-The old outer MainLoop hook is removed. Load/revert callbacks clear owned
-graphs immediately. Before native shutdown, clear remaining graphs through
-the WinMain call site: SE ID 35545 + `0x35` (`0x1405ACC05`), AE ID 36544 +
-`0x1AE` (`0x14063EB1E`), VR RVA `0x5B4290` + `0x35` (`0x1405B42C5`).
-Each is an E8 call in IDA. The previous handler is called after cleanup;
-an already installed SafeExit can still terminate the process normally.
+| Runtime | Function | Offset | Call address | Native target |
+| --- | --- | --- | --- | --- |
+| SE 1.5.97 | ID 35565 | `0x56D` | `0x1405B355D` | `0x14113E950` |
+| AE 1.6.1170 | ID 36564 | `0x9DC` | `0x14064687C` | `0x14124ABF0` |
+| VR 1.4.15 | RVA `0x5BAB10` | `0x611` | `0x1405BB121` | `0x141198BA0` |
+
+The pause/freeze branches rejoin before this call. FSMP's MainHooks::Unk_sub
+also wraps this call, invokes its previous target, then sends FrameSyncEvent
+which waits for physics and writes bone transforms. Install on InputLoaded
+and call CommonLib's returned previous target before capturing any pose.
+Do not hook either SKSE task queue call, or move scene mutation into its job
+callback. Diagnostic mode logs the first tick and pause-mode transitions
+with delta and current/main thread IDs. Runtime validation in game is still
+required, including compatibility with different FSMP builds.
+
+The old outer MainLoop hook remains removed. Load/revert callbacks clear
+owned graphs immediately. Before native shutdown, clear remaining graphs
+through the WinMain call site: SE ID 35545 + `0x35` (`0x1405ACC05`), AE ID
+36544 + `0x1AE` (`0x14063EB1E`), VR RVA `0x5B4290` + `0x35`
+(`0x1405B42C5`). Each is an E8 call in IDA. The previous handler is called
+after cleanup; an already installed SafeExit can still terminate normally.
