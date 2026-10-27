@@ -21,7 +21,7 @@ option_end()
 
 includes(get_config("commonlib"))
 set_project("GhostTrails")
-set_version("1.0.4")
+set_version("1.0.5")
 set_config("skyrim_se", true)
 set_config("skyrim_ae", true)
 set_config("skyrim_vr", true)
