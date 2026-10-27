@@ -2,7 +2,8 @@
 
 Самостоятельный SKSE плагин для замороженных светящихся силуэтов акторов.
 Плагин не требует Dodge, ESP, квеста или постоянного опроса окружающих NPC.
-Есть C++ API через `RequestPluginAPI` и Papyrus API `GhostTrails.psc`.
+Есть C++ API через `RequestPluginAPI`, Papyrus API `GhostTrails.psc` и
+[аннотации анимаций](docs/Annotations.md) через события BDI.
 
 Подготовлены пути **SE 1.5.97, AE 1.6.1170 и VR 1.4.15** в одной DLL.
 Адреса и особенности клонирования проверены по исходникам CommonLibSSE-NG,
@@ -100,6 +101,8 @@ xmake build -y GhostTrails.SDKConsumer
 xmake run GhostTrails.SDKConsumer
 xmake build -y GhostTrails.MaterialTests
 xmake run GhostTrails.MaterialTests
+xmake build -y GhostTrails.AnnotationTests
+xmake run GhostTrails.AnnotationTests
 ```
 
 Результат: `build/windows/x64/releasedbg/GhostTrails.dll`.
@@ -165,3 +168,10 @@ unload/reload 3D, переходы ячеек, загрузку/новую иг�
 Load/revert освобождают пулы в своих callbacks;
 отдельный хук вызова shutdown освобождает их до уничтожения движка и продолжает
 предыдущий обработчик, в том числе SafeExit. Проверка в игре требуется.
+
+
+В 1.1.0 добавлены `GT_Prepare`, `GT_Spawn`, `GT_Color`, `GT_Stop` с параметрами
+в payload. BDI-конфиг входит в архив; сам BDI требуется только для доставки
+новых событий из HKX. Запросы аннотаций принадлежат отдельным каналам актора,
+автоматически освобождаются и используют тот же backend без изменения ABI v1.
+Подробный синтаксис, ограничения и примеры — в [Annotations.md](docs/Annotations.md).

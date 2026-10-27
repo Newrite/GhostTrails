@@ -1,0 +1,22 @@
+[
+    {
+        "projectPath": "Actors",
+        "type": "kEvent",
+        "name": "GT_Prepare"
+    },
+    {
+        "projectPath": "Actors",
+        "type": "kEvent",
+        "name": "GT_Spawn"
+    },
+    {
+        "projectPath": "Actors",
+        "type": "kEvent",
+        "name": "GT_Color"
+    },
+    {
+        "projectPath": "Actors",
+        "type": "kEvent",
+        "name": "GT_Stop"
+    }
+]

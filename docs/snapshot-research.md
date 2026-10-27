@@ -310,3 +310,28 @@ through the WinMain call site: SE ID 35545 + `0x35` (`0x1405ACC05`), AE ID
 36544 + `0x1AE` (`0x14063EB1E`), VR RVA `0x5B4290` + `0x35`
 (`0x1405B42C5`). Each is an E8 call in IDA. The previous handler is called
 after cleanup; an already installed SafeExit can still terminate normally.
+
+
+# Animation event boundary (1.1.0)
+
+The adapter hooks Character and PlayerCharacter's TESObjectREFR animation sink,
+`VTABLE_*[2]`, ProcessEvent slot 1. Each CommonLib write_vfunc result is stored
+separately and called once. No graph sink subscriptions, actor scans, or raw
+actor pointers persist between callbacks. The event holder must match the
+receiver and be an Actor; the callback copies an owned command and BS handle
+into AnnotationRequests. The frame owner applies commands before Runtime::Tick.
+
+IDA confirms the complete-object locator offset is 0x30 for both vtables in
+all three runtimes. Native slot 1 targets (Character and Player identical in
+the unmodified binaries): SE `0x14060B470`, AE 1170 `0x14069F450`, VR
+`0x140614030`. The adapter leaves the previous callback's notification result
+unchanged. The manager ProcessEvent hook was investigated but is not used:
+actor sinks provide the direct receiver/holder relationship and avoid handling
+manager propagation as a separate command.
+
+AnnotationCommands owns the wire grammar, AnnotationRequests owns the bounded
+mailbox/channel/request lifecycle, AnimationEvents adapts borrowed engine
+arguments and production error logs. The plugin composition root injects the
+request owner and resets it with the runtime. New modules are colocated
+interfaces/implementations; the public C++ ABI remains unchanged. Tests import
+both pure modules as a real consumer without game headers.

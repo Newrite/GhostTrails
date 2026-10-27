@@ -6,17 +6,24 @@ import GhostTrails.Settings;
 import GhostTrails.Runtime;
 import GhostTrails.Geometry;
 import GhostTrails.Bindings;
+import GhostTrails.AnnotationRequests;
+import GhostTrails.AnimationEvents;
 
 namespace
 {
     // Single composition root. Domain code never resolves global dependencies.
     struct Plugin
     {
-        explicit Plugin(GhostTrails::Settings value) : settings(value), requests(settings.limits), runtime(requests, settings.limits) {}
+        explicit Plugin(GhostTrails::Settings value)
+            : settings(value), requests(settings.limits), runtime(requests, settings.limits),
+              annotations(requests, settings.limits.requests)
+        {
+        }
 
         GhostTrails::Settings settings;
         GhostTrails::Requests requests;
         GhostTrails::Runtime runtime;
+        GhostTrails::Annotations::RequestOwner annotations;
         std::uint64_t appliedGeneration{};
         bool geometryReady{};
         bool initialized{};
@@ -67,6 +74,7 @@ namespace
         if (reset) {
             // SKSE load/revert callbacks run on the game thread. Release the
             // owned scene graphs here rather than waiting through a load.
+            plugin->annotations.Reset();
             plugin->runtime.Reset();
             plugin->appliedGeneration = plugin->requests.Session().epoch;
             plugin->enteredWorld = false;
@@ -121,6 +129,7 @@ namespace
                 session = plugin->requests.Session();
             }
             if (session.epoch != plugin->appliedGeneration) {
+                plugin->annotations.Reset();
                 plugin->runtime.Reset();
                 plugin->appliedGeneration = session.epoch;
                 plugin->enteredWorld = false;
@@ -158,6 +167,7 @@ namespace
                         paused, delta, REX::W32::GetCurrentThreadId(), main->threadID);
                 }
 #endif
+                GhostTrails::AnimationEvents::Log(plugin->annotations.Tick(delta));
                 plugin->runtime.Tick(delta);
             }
         }
@@ -224,6 +234,7 @@ namespace
         SKSE::AllocTrampoline(128);
         FrameUpdate::original = SKSE::GetTrampoline().write_call<5>(call, FrameUpdate::Thunk);
         Shutdown::original = SKSE::GetTrampoline().write_call<5>(shutdown, Shutdown::Thunk);
+        GhostTrails::AnimationEvents::Install(plugin->annotations);
         logger::info("Frame synchronization and shutdown hooks installed; runtime {}", version.string());
 #ifdef GHOSTTRAILS_DIAGNOSTICS
         FrameUpdate::site = call;
@@ -271,7 +282,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     if (!SetupLog()) return false;
-    logger::info("GhostTrails 1.0.7 load entry; logger ready");
+    logger::info("GhostTrails 1.1.0 load entry; logger ready");
     SKSE::Init(skse, false);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
     logger::debug("SKSE initialization complete; diagnostics enabled unconditionally");
