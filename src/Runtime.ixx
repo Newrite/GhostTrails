@@ -10,7 +10,7 @@ import GhostTrails.Geometry;
 
 export namespace GhostTrails
 {
-    // This owner is called only from Main::Update. Actor references are resolved
+    // This owner runs on the game thread at the SKSE task queue boundary. Actor references are resolved
     // into temporary NiPointers; pools own geometry, never an actor's lifetime.
     class Runtime
     {

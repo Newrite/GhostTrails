@@ -21,6 +21,7 @@ namespace
         bool geometryReady{};
         bool initialized{};
         bool operational{};
+        bool callbacksReady{};
         bool enteredWorld{};
 #ifdef GHOSTTRAILS_DIAGNOSTICS
         bool updateEntered{};
@@ -62,26 +63,40 @@ namespace
     void Transition(bool playable, bool reset)
     {
         plugin->requests.ChangeSession(playable, reset);
+        if (reset) {
+            // SKSE load/revert callbacks run on the game thread. Release the
+            // owned scene graphs here rather than waiting through a load.
+            plugin->runtime.Reset();
+            plugin->appliedGeneration = plugin->requests.Session().epoch;
+            plugin->enteredWorld = false;
+        }
 #ifdef GHOSTTRAILS_DIAGNOSTICS
         const auto session = plugin->requests.Session();
         logger::debug("Session transition: playable={} reset={} epoch={}", playable, reset, session.epoch);
 #endif
     }
 
-    struct MainUpdate
+    struct TaskUpdate
     {
-        static void Thunk(RE::Main* main)
+        static void Thunk(void* taskPool)
         {
 #ifdef GHOSTTRAILS_DIAGNOSTICS
             if (!plugin->updateEntered) {
                 plugin->updateEntered = true;
-                logger::debug("Main::Update first entry: operational={} initialized={}", plugin->operational, plugin->initialized);
+                logger::debug("Task queue first entry: operational={} initialized={}", plugin->operational, plugin->initialized);
             }
 #endif
-            if (!plugin->operational) {
-                original(main);
-                return;
+            // Includes SKSE's queued AddTask callbacks and any earlier hooks.
+            original(taskPool);
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+            if (!plugin->updateReturned) {
+                plugin->updateReturned = true;
+                logger::debug("Task queue chained call first return");
             }
+#endif
+            if (!plugin->operational) return;
+            auto* main = RE::Main::GetSingleton();
+            if (!main) return;
             if (!plugin->initialized) {
                 plugin->geometryReady = GhostTrails::Geometry::Install();
                 plugin->initialized = true;
@@ -90,14 +105,16 @@ namespace
 #endif
             }
 
-            // Release scene resources before the engine advances a load/reset/quit.
-            auto session = plugin->requests.Session();
             const auto& mainState = main->GetRuntimeData();
+            if (mainState.quitGame || mainState.resetGame) {
+                Transition(false, true);
+                return;
+            }
+
+            auto session = plugin->requests.Session();
             const auto ui = RE::UI::GetSingleton();
             const bool menu = ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME);
-            const bool leaving = mainState.quitGame || mainState.resetGame ||
-                (menu && plugin->enteredWorld);
-            if (leaving && session.playable) {
+            if (menu && plugin->enteredWorld && session.playable) {
                 Transition(false, true);
                 session = plugin->requests.Session();
             }
@@ -108,22 +125,6 @@ namespace
                 logger::info("Transient state cleared for session epoch={}", session.epoch);
             }
 
-            original(main);
-#ifdef GHOSTTRAILS_DIAGNOSTICS
-            if (!plugin->updateReturned) {
-                plugin->updateReturned = true;
-                logger::debug("Main::Update chained call first return");
-            }
-#endif
-            // Main::Update may request termination itself; WinMain need not
-            // enter this hook again before destroying the engine's allocators.
-            if (mainState.quitGame || mainState.resetGame) {
-                Transition(false, true);
-                plugin->runtime.Reset();
-                plugin->appliedGeneration = plugin->requests.Session().epoch;
-                plugin->enteredWorld = false;
-                return;
-            }
             auto* currentUI = RE::UI::GetSingleton();
             const bool loading = !currentUI || currentUI->IsMenuOpen(RE::MainMenu::MENU_NAME) ||
                 currentUI->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
@@ -156,9 +157,13 @@ namespace
         // chain correctly through another plugin; it is evidence, not rejection.
         static void LogHookSite()
         {
+            if (!site) {
+                logger::debug("Task queue hook awaits InputLoaded");
+                return;
+            }
             std::array<std::uint8_t, 5> bytes{};
             std::memcpy(bytes.data(), reinterpret_cast<const void*>(site), bytes.size());
-            logger::debug("Main::Update hook check: site={:X} bytes={:02X} {:02X} {:02X} {:02X} {:02X} changed={} entered={} returned={}",
+            logger::debug("Task queue hook check: site={:X} bytes={:02X} {:02X} {:02X} {:02X} {:02X} changed={} entered={} returned={}",
                 site, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes != installedBytes,
                 plugin->updateEntered, plugin->updateReturned);
         }
@@ -169,7 +174,20 @@ namespace
         static inline REL::Relocation<decltype(Thunk)> original;
     };
 
-    bool InstallMainHook()
+    struct Shutdown
+    {
+        static void Thunk()
+        {
+            plugin->operational = false;
+            Transition(false, true);
+            logger::info("Transient resources released before engine shutdown");
+            original();
+        }
+
+        static inline REL::Relocation<decltype(Thunk)> original;
+    };
+
+    bool InstallTaskHook()
     {
         const auto version = REL::Module::get().version();
         const bool known = (REL::Module::IsSE() && version == REL::Version{1, 5, 97, 0}) ||
@@ -179,21 +197,30 @@ namespace
             logger::error("Unaudited runtime {}; no patches installed", version.string());
             return false;
         }
-        const REL::Relocation<std::uintptr_t> loop{REL::RelocationID{35551, 36544}};
-        const auto call = loop.address() + REL::Relocate(0x11F, 0x160, 0x11F);
-        if (*reinterpret_cast<const std::uint8_t*>(call) != 0xE8) {
-            logger::error("Main::Update call site changed at {:X}; plugin disabled", call);
+
+        // SKSE Hooks_Threads.cpp's primary ProcessTasks call, after the job
+        // synchronization phase. InputLoaded occurs after SKSE commits it.
+        const REL::Relocation<std::uintptr_t> update{REL::VariantID{35565, 36564, 0x5BAB10}};
+        const auto call = update.address() + REL::Relocate(0x6B8, 0xB9C, 0x75E);
+        const REL::Relocation<std::uintptr_t> winMain{REL::VariantID{35545, 36544, 0x5B4290}};
+        const auto shutdown = winMain.address() + REL::Relocate(0x35, 0x1AE, 0x35);
+        if (*reinterpret_cast<const std::uint8_t*>(call) != 0xE8 ||
+            *reinterpret_cast<const std::uint8_t*>(shutdown) != 0xE8) {
+            logger::error("Task queue/shutdown call encoding unavailable at {:X}/{:X}; plugin disabled", call, shutdown);
             return false;
         }
+
         SKSE::AllocTrampoline(128);
-        MainUpdate::original = SKSE::GetTrampoline().write_call<5>(call, MainUpdate::Thunk);
-        logger::info("Main::Update hook installed; runtime {}", version.string());
+        TaskUpdate::original = SKSE::GetTrampoline().write_call<5>(call, TaskUpdate::Thunk);
+        Shutdown::original = SKSE::GetTrampoline().write_call<5>(shutdown, Shutdown::Thunk);
+        logger::info("Task queue and shutdown hooks installed; runtime {}", version.string());
 #ifdef GHOSTTRAILS_DIAGNOSTICS
-        MainUpdate::site = call;
-        std::memcpy(MainUpdate::installedBytes.data(), reinterpret_cast<const void*>(call), MainUpdate::installedBytes.size());
-        logger::debug("Main::Update hook addresses: site={:X} previous={:X} thunk={:X}",
-            call, MainUpdate::original.address(), reinterpret_cast<std::uintptr_t>(&MainUpdate::Thunk));
-        MainUpdate::LogHookSite();
+        TaskUpdate::site = call;
+        std::memcpy(TaskUpdate::installedBytes.data(), reinterpret_cast<const void*>(call), TaskUpdate::installedBytes.size());
+        logger::debug("Task queue hook addresses: site={:X} previous={:X} thunk={:X}; shutdown={:X} previous={:X}",
+            call, TaskUpdate::original.address(), reinterpret_cast<std::uintptr_t>(&TaskUpdate::Thunk),
+            shutdown, Shutdown::original.address());
+        TaskUpdate::LogHookSite();
 #endif
         return true;
     }
@@ -205,9 +232,12 @@ namespace
         logger::debug("SKSE message: type={} operational={} updateEntered={} geometry={} epoch={}",
             message->type, plugin->operational, plugin->updateEntered, plugin->geometryReady,
             plugin->requests.Session().epoch);
-        MainUpdate::LogHookSite();
+        TaskUpdate::LogHookSite();
 #endif
         switch (message->type) {
+        case SKSE::MessagingInterface::kInputLoaded:
+            if (plugin->callbacksReady && !TaskUpdate::original.address()) plugin->operational = InstallTaskHook();
+            break;
         case SKSE::MessagingInterface::kPreLoadGame:
             Transition(false, true);
             break;
@@ -230,7 +260,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     if (!SetupLog()) return false;
-    logger::info("GhostTrails 1.0.5 load entry; logger ready");
+    logger::info("GhostTrails 1.0.6 load entry; logger ready");
     SKSE::Init(skse, false);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
     logger::debug("SKSE initialization complete; diagnostics enabled unconditionally");
@@ -247,17 +277,15 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
         logger::error("Required SKSE messaging/Papyrus/serialization interface unavailable");
         return false;
     }
-    if (!InstallMainHook()) return false;
-
     if (!messaging->RegisterListener(Message) || !papyrus->Register(GhostTrails::Bindings::Register)) {
-        // SKSE FreeLibrary()s a DLL whose Load returns false. Once a hook or
-        // callback is published, retain the DLL and keep admission disabled.
+        // Keep any successfully published callback valid if the other
+        // registration fails; admission remains disabled.
         logger::error("SKSE callback registration failed; DLL retained disabled for callback safety");
         return true;
     }
     serialization->SetUniqueID(0x4754524C); // GTRL; transient geometry is never saved.
     serialization->SetRevertCallback(Revert);
-    plugin->operational = true;
-    logger::info("GhostTrails initialization complete; awaiting playable session");
+    plugin->callbacksReady = true;
+    logger::info("GhostTrails initialization complete; awaiting InputLoaded to chain SKSE task processing");
     return true;
 }
