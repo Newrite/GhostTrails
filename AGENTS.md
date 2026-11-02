@@ -12,6 +12,13 @@ Prefer **correct domain modeling, clear ownership, cohesive architecture, readab
 - Keep implementation details **unexported and encapsulated**, not necessarily in separate physical files. A small change should normally be localized to its owning component. Genuine cross-boundary contracts can require coordinated changes; do not duplicate logic merely to reduce the file count.
 - Favor high cohesion and explicit dependencies. Avoid generic `Manager`, `Service`, `Common`, or `Utils` dumping grounds, needless forwarding layers, cyclic dependencies, speculative plugin systems, and abstractions built for imagined future requirements.
 
+## Make assumptions explicit and define success
+
+- **Do not silently make material assumptions.** Investigate the existing code and contracts first. Surface remaining uncertainty, competing interpretations, and consequential tradeoffs before committing to a design. Ask for clarification only when the ambiguity cannot be responsibly resolved from available context.
+- **Challenge flawed premises.** Suggest a simpler or more accurate alternative when it better satisfies the actual goal. Do not blindly implement a requested mechanism if a substantially better solution exists. Explain the tradeoff briefly and proceed with justified choices.
+- **Define observable success for nontrivial tasks.** Establish the behavior, invariants, regressions, and integration checks that demonstrate completion before implementation. Iterate until the criteria are verified, or explicitly report what remains unverified and why. Keep plans and checkpoints proportional to the task.
+- **Prefer the smallest coherent solution, not merely the smallest diff.** Avoid unrequested features, speculative configurability, and unnecessary abstractions. Do not use "surgical changes" as an excuse to preserve demonstrably flawed architecture within the agreed scope. Conversely, do not expand the scope to unrelated cleanup.
+
 ## Continuously examine and improve the architecture
 
 **Architecture is ongoing engineering work, not a one-time plan written before coding.** Do not just add another field, constructor parameter, forwarded dependency, branch, or callback to make the next test pass. At natural checkpoints, inspect whether the code is signaling a missing or misplaced abstraction. Pause and redesign locally when the evidence warrants it.
@@ -81,6 +88,14 @@ export namespace project
 ```
 
 This is a colocation example, not an endorsement of trivial wrappers, a mandatory naming style, or blanket `noexcept`. Non-exported helpers and exported classes can coexist in the same module file. Keep functions cohesive and readable rather than forcing every substantial function body inline inside a class.
+
+## Design APIs to guide correct use
+
+- **Review APIs from the caller's perspective.** A public interface should reveal what a consumer can do, which states and inputs are valid, what ownership and lifetime it requires, what it changes, and how it reports failure. Examine real call sites rather than judging an API only by its declaration.
+- **Make correct usage easy and incorrect usage difficult (poka-yoke).** Express meaningful distinctions through types, constrained construction, named operations, and explicit state transitions. Avoid ambiguous boolean flags, loosely related setters that permit inconsistent intermediate states, raw stringly typed protocols, and public representation details that bypass invariants. Do not introduce wrappers or elaborate type hierarchies without a real misuse risk or domain benefit.
+- **Apply Command-Query Separation (CQS) where it clarifies contracts.** Queries should normally observe without changing externally visible state; commands should make their effects explicit. Do not force a split when one atomic operation intentionally both changes state and returns a result (for example, `TryPop` or an idempotent state transition). Name such operations to communicate their semantics.
+- **Design for discoverability and clear affordances.** Use domain vocabulary, intention-revealing operation names, typed units, and coherent method groups. Prefer interfaces that advertise valid actions over a broad surface of low-level mutation knobs. Comments document non-obvious constraints and rationale; they should not compensate for misleading names or unenforced invariants.
+- **Verify API ergonomics and evolution.** Exercise typical and invalid usage at representative call sites and in contract tests. Review compatibility, error semantics, ownership, allocation, and dispatch costs at module/ABI boundaries. Do not add public surface area, extension points, or generic interfaces merely for hypothetical consumers.
 
 ## Model valid states with types
 
