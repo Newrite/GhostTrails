@@ -15,8 +15,8 @@ static_assert(offsetof(GhostTrailsAPI::SpawnOptions, spawnWindow) == 40);
 
 int main()
 {
-    const auto absent = GhostTrailsExample::Spawn(0);
-    if (absent.result != GhostTrailsAPI::Result::NotReady || absent.id != 0) return 1;
-    std::cout << "Independent SDK module imports without CommonLib; absent DLL handled\n";
-    return 0;
+  const auto absent = GhostTrailsExample::Spawn(0);
+  if (absent.result != GhostTrailsAPI::Result::NotReady || absent.id != 0) return 1;
+  std::cout << "Independent SDK module imports without CommonLib; absent DLL handled\n";
+  return 0;
 }
