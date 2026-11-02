@@ -335,3 +335,35 @@ arguments and production error logs. The plugin composition root injects the
 request owner and resets it with the runtime. New modules are colocated
 interfaces/implementations; the public C++ ABI remains unchanged. Tests import
 both pure modules as a real consumer without game headers.
+
+# Solver-written poses and the local/world invariant
+
+A physics solver can write a bone's **world** transform and leave **local** at the
+animation pose. FSMP does exactly that: `SkyrimBone::writeTransform` assigns
+`m_node->world.rotate` and `m_node->world.translate` and nothing else. A ghost that
+copied only the world transform therefore loses the simulated pose as soon as the
+engine's update pass rebuilds `world = parent->world * local` — which reproduces the
+animation pose. The reported symptom is a silhouette whose hair and skirt look as if
+physics were switched off, while the live actor simulates normally.
+
+`Pool::Spawn` now treats the captured world as authoritative and re-derives `local`
+for every bound node and every flattened-bone-tree entry (`Ghost::ReconcileLocals`).
+It is a no-op when the two already agree, and deriving from world on each spawn
+rather than from the previous local cannot accumulate error. The count it returns is
+logged under `GHOSTTRAILS_DIAGNOSTICS`; a non-zero count proves a solver wrote world
+behind local, and a zero count means the captured world already reproduced the pose.
+
+Hook ordering was checked and is not the cause: FSMP installs its frame hooks at
+`kPostPostLoad` and this plugin at `kInputLoaded`, so this plugin's thunk is outermost,
+and its `original()` runs FSMP's `Unk_sub` — which waits for the worker task and calls
+`writeTransform` — before any pose is read. This plugin also already refuses to install
+if the call site is not an `E8` call.
+
+Consequences worth knowing:
+
+* A consumer that copies only `local` and then calls `UpdateDownwardPass` can never
+  capture a solver-written pose; Sandevistan's `Freeze` does precisely that.
+* Nothing here proves the pose survives in game. The remaining check is visual: SMP
+  hair and a skirt on a live actor should follow the simulated pose in the ghost, and
+  the diagnostics count should be non-zero on a rig that has SMP bones.
+

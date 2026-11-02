@@ -27,6 +27,9 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\API.md') -Destination $sdk
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\Annotations.md') -Destination $sdk
 Copy-Item -Path (Join-Path $projectRoot 'docs\*.md') -Destination $docs
 Copy-Item -LiteralPath (Join-Path $projectRoot 'examples\NativeConsumer.ixx') -Destination $sdk
-$archive = Join-Path $projectRoot ('dist\GhostTrails-1.1.0-' + $variant + '.zip')
+$declared = (Select-String -LiteralPath (Join-Path $projectRoot 'xmake.lua') -Pattern 'set_version\("([0-9]+\.[0-9]+\.[0-9]+)"\)').Matches
+if ($declared.Count -ne 1) { throw 'xmake.lua must declare exactly one set_version("x.y.z").' }
+$version = $declared[0].Groups[1].Value
+$archive = Join-Path $projectRoot ('dist\GhostTrails-' + $version + '-' + $variant + '.zip')
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $archive -Force
 Get-Item -LiteralPath $archive | Select-Object FullName,Length

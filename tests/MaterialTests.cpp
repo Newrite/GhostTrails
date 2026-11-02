@@ -46,6 +46,31 @@ namespace
         Check(C::Exclude(effect) == C::Exclusion::Overlay, "overlay exclusion is independent of material support");
     }
 
+    void VertexFormatCoverage()
+    {
+        // A rigid surface without a normal renders black under the ghost's fresh lighting
+        // material, while an unreadable vertex description proves nothing.
+        C::SourceSurface body{"malebody", C::Shading::Lighting, C::Skinning::Rigid,
+            C::Role::Ordinary, 1, 1};
+        Check(!C::Exclude(body), "an unreadable vertex description never excludes a surface");
+
+        body.normals = C::Normals::Present;
+        Check(!C::Exclude(body), "a rigid surface with normals stays eligible");
+
+        body.normals = C::Normals::Absent;
+        Check(C::Exclude(body) == C::Exclusion::NoNormals, "a rigid surface without normals is rejected");
+
+        body.skinning = C::Skinning::Skinned;
+        Check(!C::Exclude(body), "skinned geometry is exempt from the normal requirement");
+
+        body.skinning = C::Skinning::Rigid;
+        body.role = C::Role::Decal;
+        Check(C::Exclude(body) == C::Exclusion::Decal, "a decal keeps its more specific reason");
+        body.role = C::Role::Ordinary;
+        body.materialAlpha = 0;
+        Check(C::Exclude(body) == C::Exclusion::Invisible, "invisibility still outranks the vertex format");
+    }
+
     void NativeFadeCoverage()
     {
         // Regression: a scaled positive cutoff can write invisible depth.
@@ -80,6 +105,7 @@ namespace
 int main()
 {
     SurfaceSelection();
+    VertexFormatCoverage();
     NativeFadeCoverage();
     if (failures) return 1;
     std::puts("Surface selection and native fade coverage contracts passed");

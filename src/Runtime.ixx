@@ -31,6 +31,7 @@ export namespace GhostTrails
             const auto wallTime = std::chrono::steady_clock::now();
             auto snapshot = requests_.Snapshot();
             std::uint32_t cloneBudget = limits_.clonesPerFrame;
+            float cloneMilliseconds{};
 
             for (auto& [handle, entry] : actors_) {
                 if (entry.gone) continue;
@@ -76,7 +77,7 @@ export namespace GhostTrails
                 auto& timeline = it->second;
                 const auto actor = actors_.find(request.actor);
                 if (actor != actors_.end() && actor->second.gone) timeline.Fail(API::Failure::ActorGone);
-                else if (timeline.Due(gameTime_)) Process(request, timeline, cloneBudget, wallTime);
+                else if (timeline.Due(gameTime_)) Process(request, timeline, cloneBudget, cloneMilliseconds, wallTime);
                 requests_.Publish(request.id, timeline.Status());
                 if (timeline.Finished()) {
                     const auto result = timeline.Status();
@@ -158,7 +159,7 @@ export namespace GhostTrails
         }
 
         void Process(const Request& request, Timeline& timeline, std::uint32_t& budget,
-            std::chrono::steady_clock::time_point wallTime)
+            float& cloneMilliseconds, std::chrono::steady_clock::time_point wallTime)
         {
             auto found = actors_.find(request.actor);
             if (found == actors_.end()) {
@@ -228,9 +229,12 @@ export namespace GhostTrails
                 Retry(request, timeline, API::Failure::Capacity);
                 return;
             }
-            if (!budget) return;
+            if (!budget || cloneMilliseconds >= limits_.cloneBudgetMilliseconds) return;
             --budget;
+            const auto growStarted = std::chrono::steady_clock::now();
             const auto grown = entry.pool.Grow();
+            const auto growFinished = std::chrono::steady_clock::now();
+            cloneMilliseconds += std::chrono::duration<float, std::milli>(growFinished - growStarted).count();
             if (!grown) {
                 Retry(request, timeline, Failure(grown.error()));
                 return;

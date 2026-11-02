@@ -282,7 +282,7 @@ namespace
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     if (!SetupLog()) return false;
-    logger::info("GhostTrails 1.1.0 load entry; logger ready");
+    logger::info("GhostTrails 1.1.2 load entry; logger ready");
     SKSE::Init(skse, false);
 #ifdef GHOSTTRAILS_DIAGNOSTICS
     logger::debug("SKSE initialization complete; diagnostics enabled unconditionally");

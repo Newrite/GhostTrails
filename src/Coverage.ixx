@@ -11,7 +11,10 @@ export namespace GhostTrails::Coverage
     enum class Shading { Unsupported, Lighting, Effect };
     enum class Skinning { Rigid, Skinned };
     enum class Role { Ordinary, Decal, WeaponBlood };
-    enum class Exclusion { Overlay, Invisible, Decal, AuxiliaryEffect, Unsupported };
+    // Vertex-format evidence. Unknown means the description was not populated when the
+    // surface was inspected, which proves nothing and must not exclude it.
+    enum class Normals { Unknown, Present, Absent };
+    enum class Exclusion { Overlay, Invisible, NoNormals, Decal, AuxiliaryEffect, Unsupported };
 
     struct SourceSurface
     {
@@ -21,6 +24,7 @@ export namespace GhostTrails::Coverage
         Role role;
         float propertyAlpha;
         float materialAlpha;
+        Normals normals{Normals::Unknown};
     };
 
     std::optional<Exclusion> Exclude(const SourceSurface& source)
@@ -34,6 +38,12 @@ export namespace GhostTrails::Coverage
         if (source.skinning == Skinning::Rigid) {
             if (source.role == Role::Decal) return Exclusion::Decal;
             if (source.shading == Shading::Effect) return Exclusion::AuxiliaryEffect;
+        }
+        // A rigid surface whose vertex format carries no normal renders black or plastic
+        // under the fresh lighting material built for a ghost. Skinned geometry is exempt:
+        // its authored layout stays in charge. Checked last so a more specific reason wins.
+        if (source.skinning == Skinning::Rigid && source.normals == Normals::Absent) {
+            return Exclusion::NoNormals;
         }
         return std::nullopt;
     }

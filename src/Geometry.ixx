@@ -162,6 +162,26 @@ namespace GhostTrails::Geometry
         return object.name.c_str() ? object.name.c_str() : "<unnamed>";
     }
 
+    // A solver that writes only a bone's world transform (FSMP does exactly that, leaving local
+    // at the animation pose) breaks the usual world == parent->world * local invariant. Comparing
+    // the two keeps an already consistent node untouched; this is a guard against needless
+    // rewrites, not a pose comparison, so the tolerance can be tight.
+    bool SameTransform(const RE::NiTransform& lhs, const RE::NiTransform& rhs)
+    {
+        constexpr float epsilon = 1e-4f;
+        const auto close = [](float a, float b) { return std::abs(a - b) < epsilon; };
+        if (!close(lhs.scale, rhs.scale) || !close(lhs.translate.x, rhs.translate.x) ||
+            !close(lhs.translate.y, rhs.translate.y) || !close(lhs.translate.z, rhs.translate.z)) {
+            return false;
+        }
+        for (std::size_t row = 0; row < 3; ++row) {
+            for (std::size_t column = 0; column < 3; ++column) {
+                if (!close(lhs.rotate.entry[row][column], rhs.rotate.entry[row][column])) return false;
+            }
+        }
+        return true;
+    }
+
     struct Stamp
     {
         RE::NiAVObject* object{};
@@ -172,6 +192,9 @@ namespace GhostTrails::Geometry
         RE::BSShaderMaterial* material{};
         const RE::BSFlattenedBoneTree::BoneEntry* bones{};
         std::uint32_t boneCount{};
+        // The vertex format now decides usability, so a change in it must invalidate a
+        // pooled clone just like a changed triangle count does.
+        std::uint16_t vertexFlags{};
         std::uint16_t vertices{}, triangles{};
         const void* dynamicData{};
         std::uint32_t dynamicBytes{};
@@ -188,6 +211,7 @@ namespace GhostTrails::Geometry
             stamp.partition = stamp.skin ? stamp.skin->skinPartition.get() : nullptr;
             stamp.shader = data.shaderProperty.get();
             stamp.material = stamp.shader ? stamp.shader->material : nullptr;
+            stamp.vertexFlags = static_cast<std::uint16_t>(data.vertexDesc.GetFlags());
         }
         if (auto* tree = netimmerse_cast<RE::BSFlattenedBoneTree*>(&object)) {
             const auto& data = tree->GetRuntimeData();
@@ -208,12 +232,23 @@ namespace GhostTrails::Geometry
         return stamp;
     }
 
+    // The vertex description is filled in by geometry setup, so an empty one only means
+    // "not known yet" and must never exclude a surface on its own.
+    Coverage::Normals VertexNormals(const RE::BSGraphics::VertexDesc& description)
+    {
+        constexpr auto noAttributes = static_cast<RE::BSGraphics::Vertex::Flags>(0);
+        if (description.GetFlags() == noAttributes) return Coverage::Normals::Unknown;
+        return description.HasFlag(RE::BSGraphics::Vertex::VF_NORMAL) ? Coverage::Normals::Present
+                                                                     : Coverage::Normals::Absent;
+    }
+
     const char* Exclusion(RE::BSGeometry& geometry)
     {
         const auto& data = geometry.GetGeometryRuntimeData();
         Coverage::SourceSurface source{Name(geometry), Coverage::Shading::Unsupported,
             data.skinInstance ? Coverage::Skinning::Skinned : Coverage::Skinning::Rigid,
             Coverage::Role::Ordinary, 1, 1};
+        source.normals = VertexNormals(data.vertexDesc);
 
         if (const auto* lit = netimmerse_cast<RE::BSLightingShaderProperty*>(data.shaderProperty.get()); lit && lit->material) {
             source.shading = Coverage::Shading::Lighting;
@@ -232,6 +267,7 @@ namespace GhostTrails::Geometry
         switch (*excluded) {
         case Coverage::Exclusion::Overlay: return "RaceMenu overlay";
         case Coverage::Exclusion::Invisible: return "invisible source surface";
+        case Coverage::Exclusion::NoNormals: return "rigid surface whose vertex format carries no normal";
         case Coverage::Exclusion::Decal: return "blood/rigid decal";
         case Coverage::Exclusion::AuxiliaryEffect: return "unskinned auxiliary effect";
         case Coverage::Exclusion::Unsupported: return "unsupported lighting/effect material";
@@ -323,6 +359,28 @@ namespace GhostTrails::Geometry
         std::vector<Materials::Surface> surfaces;
         std::vector<RE::NiSkinInstance*> skins;
 
+        // One 8-bit step of the rendered result: a smaller change cannot be seen, so it is
+        // not worth rewriting every surface of every pooled ghost every frame.
+        static constexpr float visibleStep = 1.0f / 255.0f;
+
+        struct Applied
+        {
+            float red, green, blue, intensity, rimPower, opacity;
+
+            static bool WithinOneStep(const Applied& lhs, const Applied& rhs)
+            {
+                // Rim is a flag plus a power: the on/off transition must never be swallowed
+                // by the numeric step, or a ghost would keep the rim of a previous look.
+                const bool sameRim = (lhs.rimPower > 0) == (rhs.rimPower > 0);
+                return sameRim && std::abs(lhs.red - rhs.red) < visibleStep &&
+                       std::abs(lhs.green - rhs.green) < visibleStep &&
+                       std::abs(lhs.blue - rhs.blue) < visibleStep &&
+                       std::abs(lhs.intensity - rhs.intensity) < visibleStep &&
+                       std::abs(lhs.rimPower - rhs.rimPower) < visibleStep &&
+                       std::abs(lhs.opacity - rhs.opacity) < visibleStep;
+            }
+        };
+
         struct Active
         {
             double born;
@@ -334,6 +392,7 @@ namespace GhostTrails::Geometry
 #endif
         };
         std::optional<Active> active;
+        std::optional<Applied> applied;
 
         Ghost() = default;
         Ghost(const Ghost&) = delete;
@@ -350,11 +409,55 @@ namespace GhostTrails::Geometry
             }
             parent.reset();
             active.reset();
+            applied.reset();
+        }
+
+        // The engine rebuilds every node's world from local during its update pass, so a pose
+        // captured as world alone is discarded before the draw. A physics solver that writes only
+        // world (FSMP) therefore never reaches a ghost: local still holds the animation pose, which
+        // is what the rebuild reproduces. Treating the captured world as authoritative and
+        // re-deriving local makes the pose survive any rebuild. Deriving from world on every spawn
+        // rather than from the previous local cannot accumulate error.
+        // Returns how many entries had to be rewritten, which is also the evidence that a solver
+        // wrote world behind local.
+        std::size_t ReconcileLocals()
+        {
+            std::size_t rewritten = 0;
+            for (const auto& binding : bindings) {
+                if (binding.hidden) continue;
+                auto& target = *binding.target;
+                auto* parent = target.parent;
+                if (!parent) continue;
+                if (SameTransform(parent->world * target.local, target.world)) continue;
+                target.local = parent->world.Invert() * target.world;
+                ++rewritten;
+            }
+            // A flattened bone tree keeps its bones in an array rather than in the scene graph, so
+            // the parent is an index into that same array. Only the captured world is read here,
+            // so entry order within the array does not matter.
+            for (const auto& tree : trees) {
+                auto& data = tree.target->GetRuntimeData();
+                if (!data.boneEntries) continue;
+                for (std::uint32_t i = 0; i < tree.count; ++i) {
+                    auto& entry = data.boneEntries[i];
+                    if (entry.parentIndex >= 0 && static_cast<std::uint32_t>(entry.parentIndex) >= tree.count) continue;
+                    const auto& parent = entry.parentIndex < 0 ? tree.target->world
+                                                              : data.boneEntries[entry.parentIndex].world;
+                    if (SameTransform(parent * entry.local, entry.world)) continue;
+                    entry.local = parent.Invert() * entry.world;
+                    ++rewritten;
+                }
+            }
+            return rewritten;
         }
 
         void ApplyLook(const API::Appearance& look, float visibility)
         {
             const float opacity = Coverage::ObjectFadeOpacity(look.alpha * visibility);
+            const Applied requested{look.red, look.green, look.blue, look.intensity, look.rimPower, opacity};
+            if (applied && Applied::WithinOneStep(*applied, requested)) return;
+            applied = requested;
+
             auto& fadeState = fade->GetRuntimeData();
             fadeState.currentFade = opacity;
             // Alternate channel is multiplied only for selected LOD passes;
@@ -665,6 +768,10 @@ export namespace GhostTrails::Geometry
                     target.boneEntries[i].world = source.boneEntries[i].world;
                 }
             }
+            const auto reposed = ghost.ReconcileLocals();
+#ifdef GHOSTTRAILS_DIAGNOSTICS
+            if (reposed) logger::debug("request={} captured pose carried in local on {} entries", requestID, reposed);
+#endif
             for (auto* skin : ghost.skins) skin->frameID = (std::numeric_limits<std::uint32_t>::max)();
 
             ghost.ApplyLook(look, 1);
